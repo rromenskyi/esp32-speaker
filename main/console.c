@@ -89,9 +89,9 @@ static void measure(int ms)
     double sum[AUDIO_MIC_SLOTS] = {0};
     int peak[AUDIO_MIC_SLOTS] = {0};
     size_t n = 0;
-    for (int i = 0; i < 2; i++) audio_read(buf, CHUNK);
+    for (int i = 0; i < 2; i++) voice_capture_raw(buf, CHUNK);
     for (int t = 0; t < ms; t += 10) {
-        audio_read(buf, CHUNK);
+        voice_capture_raw(buf, CHUNK);
         for (int i = 0; i < CHUNK; i++)
             for (int c = 0; c < AUDIO_MIC_SLOTS; c++) {
                 int v = buf[i * AUDIO_MIC_SLOTS + c];
@@ -137,11 +137,11 @@ static int cmd_rec(int argc, char **argv)
     enum { CHUNK = 160 };
     static int16_t buf[CHUNK * AUDIO_MIC_SLOTS];
     if (hz) { audio_tone(hz, ms < 900 ? ms + 100 : 900, 8000); vTaskDelay(pdMS_TO_TICKS(100)); }
-    for (int i = 0; i < 2; i++) audio_read(buf, CHUNK);
+    for (int i = 0; i < 2; i++) voice_capture_raw(buf, CHUNK);
     s_rec_len = 0;
     printf("recording %d ms...\n", ms);
     for (int t = 0; t < ms; t += 10) {
-        audio_read(buf, CHUNK);
+        voice_capture_raw(buf, CHUNK);
         memcpy(&s_rec[s_rec_len * AUDIO_MIC_SLOTS], buf, sizeof(buf));
         s_rec_len += CHUNK;
     }

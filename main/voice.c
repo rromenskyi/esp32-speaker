@@ -221,6 +221,33 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+// Raw capture tap for the console (mic/rec/loop): mic_task is the only reader
+// of the I2S RX channel, so it copies raw TDM frames here on request.
+static int16_t *volatile s_tap_buf;
+static size_t s_tap_frames, s_tap_pos;
+static SemaphoreHandle_t s_tap_done;
+
+esp_err_t voice_capture_raw(int16_t *tdm, size_t frames)
+{
+    if (!s_tap_done) s_tap_done = xSemaphoreCreateBinary();
+    s_tap_frames = frames;
+    s_tap_pos = 0;
+    s_tap_buf = tdm;
+    bool ok = xSemaphoreTake(s_tap_done, pdMS_TO_TICKS(frames / 16 + 1000)) == pdTRUE;
+    s_tap_buf = NULL;
+    return ok ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+static void tap_feed(const int16_t *tdm, size_t frames)
+{
+    int16_t *dst = s_tap_buf;
+    if (!dst || s_tap_pos >= s_tap_frames) return;
+    size_t n = s_tap_frames - s_tap_pos < frames ? s_tap_frames - s_tap_pos : frames;
+    memcpy(dst + s_tap_pos * AUDIO_MIC_SLOTS, tdm, n * AUDIO_MIC_SLOTS * sizeof(int16_t));
+    s_tap_pos += n;
+    if (s_tap_pos >= s_tap_frames) xSemaphoreGive(s_tap_done);
+}
+
 // Reads the mic continuously (keeps the RX DMA fresh) and streams 20 ms frames
 // while listening. Also drives the timeouts and the "speak done" report.
 static void mic_task(void *arg)
@@ -229,6 +256,7 @@ static void mic_task(void *arg)
     static int16_t mono[FRAME_SAMPLES], ref[FRAME_SAMPLES];
     for (;;) {
         audio_read(tdm, FRAME_SAMPLES);
+        tap_feed(tdm, FRAME_SAMPLES);
         for (int i = 0; i < FRAME_SAMPLES; i++) {
             mono[i] = tdm[i * AUDIO_MIC_SLOTS + MIC_SLOT];
             ref[i] = tdm[i * AUDIO_MIC_SLOTS + REF_SLOT];
