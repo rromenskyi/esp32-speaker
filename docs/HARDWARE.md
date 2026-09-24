@@ -94,7 +94,16 @@ Capture channels (ES7210, 1×FS TDM, measured on the device):
 | 2 | microphone | −70 dBFS | −40 dBFS |
 | 3 | not connected | −87 dBFS | −87 dBFS |
 
-With the PGA at +37 dB, normal speech at 0.5 m peaks around −16 dBFS. The PGA
+With the PGA at +37 dB, normal speech at 0.5 m peaks around −16 dBFS.
+
+Echo cancellation (`main/aec.c`, speexdsp, 64 ms tail) uses slot 1 as the
+reference; it is sample-aligned with the mics, so no delay estimation is
+needed. `aec test` on the console plays noise and reports levels. Measured:
+speaker noise at −20.6 dBFS on the mic drops to −42 dBFS after the canceller
+(~22 dB ERLE); ~10.7 ms of CPU per 20 ms frame with all speexdsp state in PSRAM.
+The float build needs `tgmath.h` + `-fsingle-precision-constant`: the S3 FPU is
+single precision, and speexdsp's double `exp/sqrt/pow` calls otherwise tripled
+the preprocessor's cost. The PGA
 scales linearly in 3 dB steps (verified 0 / 15 / 37 dB).
 
 ## Flashing notes

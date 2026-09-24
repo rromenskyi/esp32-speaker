@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "aec.h"
 #include "audio.h"
 #include "board.h"
 #include "cJSON.h"
@@ -25,7 +26,8 @@ static const char *TAG = "voice";
 #define FRAME_SAMPLES     320               // 20 ms at 16 kHz
 #define MAX_LISTEN_MS     15000             // hard cap on one utterance
 #define THINK_TIMEOUT_MS  20000             // no reply by then: back to idle
-#define MIC_SLOT          0                 // raw mic until echo cancellation lands
+#define MIC_SLOT          0                 // one of the two mics (slot 2 is the other)
+#define REF_SLOT          1                 // hardware loopback of the speaker output
 
 typedef enum { ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING } state_t;
 static const char *const ST_NAME[] = {"idle", "listening", "thinking", "speaking"};
@@ -224,14 +226,19 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 static void mic_task(void *arg)
 {
     static int16_t tdm[FRAME_SAMPLES * AUDIO_MIC_SLOTS];
-    static int16_t mono[FRAME_SAMPLES];
+    static int16_t mono[FRAME_SAMPLES], ref[FRAME_SAMPLES];
     for (;;) {
         audio_read(tdm, FRAME_SAMPLES);
-        state_t st = s_state;
-        if (st == ST_LISTENING && s_linked) {
-            for (int i = 0; i < FRAME_SAMPLES; i++) mono[i] = tdm[i * AUDIO_MIC_SLOTS + MIC_SLOT];
-            esp_websocket_client_send_bin(s_ws, (const char *)mono, sizeof(mono), pdMS_TO_TICKS(100));
+        for (int i = 0; i < FRAME_SAMPLES; i++) {
+            mono[i] = tdm[i * AUDIO_MIC_SLOTS + MIC_SLOT];
+            ref[i] = tdm[i * AUDIO_MIC_SLOTS + REF_SLOT];
         }
+        // Every frame, not only while listening: the canceller keeps adapting
+        // while the speaker talks, so it has converged when the user barges in.
+        aec_process(mono, ref, mono);
+        state_t st = s_state;
+        if (st == ST_LISTENING && s_linked)
+            esp_websocket_client_send_bin(s_ws, (const char *)mono, sizeof(mono), pdMS_TO_TICKS(100));
         xSemaphoreTake(s_lock, portMAX_DELAY);
         // Read the state age under the lock: a button can change state between
         // frames, and a stale age once aborted fresh utterances as "timeout".
@@ -276,6 +283,7 @@ static void link_start(void)
 esp_err_t voice_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK(aec_init());
     char vol[8];
     if (settings_get_str("volume", vol, sizeof(vol)) == ESP_OK) s_volume = atoi(vol);
     es8311_set_volume(s_volume);
@@ -307,4 +315,22 @@ void voice_describe(char *out, size_t len)
 {
     snprintf(out, len, "server=%s link=%s state=%s", s_url[0] ? s_url : "(none)",
              s_linked ? "up" : "down", ST_NAME[s_state]);
+}
+
+void voice_aec_test(int ms, int amplitude)
+{
+    // Wideband noise through the speaker; measure over the second half, once
+    // the canceller has had time to converge.
+    int16_t buf[FRAME_SAMPLES];
+    uint32_t seed = 12345;
+    int frames = ms / 20;
+    for (int f = 0; f < frames; f++) {
+        for (int i = 0; i < FRAME_SAMPLES; i++) {
+            seed = seed * 1664525u + 1013904223u;
+            buf[i] = (int16_t)(((int32_t)(seed >> 16) - 32768) * amplitude / 32768);
+        }
+        if (f == frames / 2) aec_stats_reset();
+        audio_write_mono(buf, FRAME_SAMPLES);
+    }
+    while (!audio_play_idle()) vTaskDelay(pdMS_TO_TICKS(20));
 }

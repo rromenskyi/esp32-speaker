@@ -7,7 +7,8 @@ front-end for your own LLM agents: microphone array in, speech out, over Wi-Fi.
 > Status: **first voice loop works** — push-to-talk on k1 streams the mic to a
 > server over WebSocket and plays the server's audio back
 > ([protocol](docs/PROTOCOL.md), [reference echo server](server/echo_server.py)).
-> Echo cancellation, a wake word and Opus are next.
+> The mic path runs speexdsp echo cancellation (hardware loopback reference),
+> noise suppression and AGC. A wake word and Opus are next.
 
 ## Hardware
 

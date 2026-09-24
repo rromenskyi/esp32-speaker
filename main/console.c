@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include "aec.h"
 #include "es7210.h"
 #include "esp_heap_caps.h"
 #include "audio.h"
@@ -238,6 +239,28 @@ static int cmd_server(int argc, char **argv)
     return 0;
 }
 
+static double db(double msq) { return msq > 0 ? 10 * log10(msq / (32768.0 * 32768.0)) : -120; }
+
+static int cmd_aec(int argc, char **argv)
+{
+    // aec on|off | aec test [ms] [amplitude]
+    if (argc >= 2 && !strcmp(argv[1], "on")) { aec_set_enabled(true); return 0; }
+    if (argc >= 2 && !strcmp(argv[1], "off")) { aec_set_enabled(false); return 0; }
+    if (argc >= 2 && !strcmp(argv[1], "test")) {
+        voice_aec_test(argc > 2 ? num(argv[2]) : 6000, argc > 3 ? num(argv[3]) : 6000);
+        aec_stats_t st = aec_stats_get();
+        if (!st.frames) { printf("no frames processed (aec off?)\n"); return 1; }
+        double n = st.frames;
+        printf("frames %lu, last %.1f ms/frame (AEC part avg %.1f ms), max %.1f ms, budget 20 ms\n",
+               (unsigned long)st.frames, aec_last_us() / 1000.0, st.echo_us / n / 1000.0, st.max_us / 1000.0);
+        printf("ref %.1f dBFS | mic %.1f | after AEC %.1f (ERLE %.1f dB) | after NS/AGC %.1f dBFS\n",
+               db(st.ref / n), db(st.mic / n), db(st.cancelled / n), db(st.mic / n) - db(st.cancelled / n), db(st.out / n));
+        return 0;
+    }
+    printf("aec: %s. aec on|off | aec test [ms] [amplitude]\n", aec_enabled() ? "on" : "off");
+    return 0;
+}
+
 static int cmd_px(int argc, char **argv)
 {
     // px <index> <r> <g> <b>: light one pixel, everything else off.
@@ -274,6 +297,7 @@ void console_start(void)
         {.command = "led",  .help = "led [count] <r> <g> <b>: case LEDs", .func = cmd_led},
         {.command = "status", .help = "status <state> [s]: preview an LED status pattern", .func = cmd_status},
         {.command = "server", .help = "server [<ws-url> [token] | -]: voice server", .func = cmd_server},
+        {.command = "aec",  .help = "aec on|off | aec test [ms] [amp]: echo canceller", .func = cmd_aec},
         {.command = "px",   .help = "px <index> <r> <g> <b>: light one pixel only", .func = cmd_px},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)

@@ -9,3 +9,5 @@ esp_err_t voice_start(void);
 esp_err_t voice_set_server(const char *url, const char *token);
 void voice_on_button(button_t b, bool pressed);
 void voice_describe(char *out, size_t len);
+// Plays noise for `ms` and leaves echo statistics in aec_stats_get().
+void voice_aec_test(int ms, int amplitude);
