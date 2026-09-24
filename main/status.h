@@ -15,9 +15,11 @@ typedef enum {
     STATUS_SPEAKING,     // soft green
     STATUS_ERROR,        // red, briefly
     STATUS_SERVER_DOWN,  // short red pulse every 5 s
+    STATUS_HOLD,         // k1 held since boot: amber blink, faster as it nears the reset
 } status_t;
 
 esp_err_t status_start(void);
 // Voice-layer state; STATUS_OFF = idle. Network states take precedence.
 void status_set_voice(status_t s);
+void status_set_hold(int progress_percent);   // 0..100; <0 ends the hold display
 void status_preview(status_t s, int seconds);

@@ -10,6 +10,7 @@
 #include "es8311.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
 #include "settings.h"
@@ -78,6 +79,31 @@ static void stop_listening(const char *reason)
     set_state(ST_THINKING);
 }
 
+// Holding k1 from power-on for this long reboots into the Wi-Fi setup portal.
+#define BOOT_HOLD_WINDOW_MS  4000     // k1 must already be down this early (buttons start ~1.3 s in)
+#define BOOT_HOLD_MS         15000
+
+static volatile bool s_boot_hold;       // k1 was down at boot and is still held
+
+static void boot_hold_task(void *arg)
+{
+    int64_t t0 = now_ms();
+    while (s_boot_hold) {
+        int64_t held = now_ms() - t0;
+        status_set_hold((int)(held * 100 / BOOT_HOLD_MS));
+        if (held >= BOOT_HOLD_MS) {
+            ESP_LOGW(TAG, "k1 held %d s since boot: rebooting into the Wi-Fi setup portal", BOOT_HOLD_MS / 1000);
+            wifi_portal_next_boot();
+            vTaskDelay(pdMS_TO_TICKS(1000));   // solid amber: "got it"
+            esp_restart();
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    status_set_hold(-1);
+    ESP_LOGI(TAG, "k1 released before %d s, no reset", BOOT_HOLD_MS / 1000);
+    vTaskDelete(NULL);
+}
+
 #define VOLUME_STEP     10
 #define VOLUME_DEFAULT  80
 
@@ -97,7 +123,15 @@ static void set_volume(int v, bool beep)
 void voice_on_button(button_t b, bool pressed)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (b == BUTTON_K1) {
+    if (b == BUTTON_K1 && (s_boot_hold || (pressed && now_ms() < BOOT_HOLD_WINDOW_MS))) {
+        // Held since power-on: this is the Wi-Fi reset gesture, not push-to-talk.
+        if (pressed && !s_boot_hold) {
+            s_boot_hold = true;
+            xTaskCreate(boot_hold_task, "boot_hold", 3072, NULL, 5, NULL);
+        } else if (!pressed) {
+            s_boot_hold = false;
+        }
+    } else if (b == BUTTON_K1) {
         if (pressed) start_listening("button");
         else stop_listening("button");
     } else if (b == BUTTON_K2 || b == BUTTON_K3) {

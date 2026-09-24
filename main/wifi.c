@@ -119,8 +119,13 @@ esp_err_t wifi_start(void)
     ap.ap.ssid_len = strlen(s_host);
 
     wifi_config_t sta = {0};
-    char pass[65] = "";
-    if (settings_get_str("wifi_ssid", s_ssid, sizeof(s_ssid)) == ESP_OK) {
+    char pass[65] = "", once[4] = "";
+    bool portal_once = settings_get_str("portal_once", once, sizeof(once)) == ESP_OK;
+    if (portal_once) {
+        settings_erase("portal_once");   // one boot only
+        ESP_LOGW(TAG, "portal requested at last boot: not joining the saved network");
+    }
+    if (!portal_once && settings_get_str("wifi_ssid", s_ssid, sizeof(s_ssid)) == ESP_OK) {
         settings_get_str("wifi_pass", pass, sizeof(pass));
         strlcpy((char *)sta.sta.ssid, s_ssid, sizeof(sta.sta.ssid));
         strlcpy((char *)sta.sta.password, pass, sizeof(sta.sta.password));
@@ -175,6 +180,8 @@ esp_err_t wifi_save_and_connect(const char *ssid, const char *pass)
     ESP_LOGI(TAG, "joining \"%s\"", ssid);
     return esp_wifi_connect();
 }
+
+esp_err_t wifi_portal_next_boot(void) { return settings_set_str("portal_once", "1"); }
 
 bool wifi_connected(void) { return s_connected; }
 bool wifi_provisioning(void) { return s_ap_on; }

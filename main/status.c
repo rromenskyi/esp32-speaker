@@ -13,6 +13,7 @@
 
 static volatile status_t s_preview = STATUS_AUTO;
 static volatile status_t s_voice = STATUS_OFF;
+static volatile int s_hold = -1;              // boot-hold progress, -1 = none
 static volatile int64_t s_preview_until;
 
 static void fill(uint8_t r, uint8_t g, uint8_t b) { leds_fill(BOARD_LED_COUNT, r, g, b); }
@@ -32,7 +33,7 @@ static void status_task(void *arg)
         if (autos == STATUS_CONNECTED && now - connected_at > CONNECTED_SHOW_MS) autos = STATUS_OFF;
         if (autos == STATUS_OFF) autos = s_voice;
 
-        shown = autos;
+        shown = s_hold >= 0 ? STATUS_HOLD : autos;
         if (s_preview != STATUS_AUTO) {
             if (now < s_preview_until) shown = s_preview;
             else s_preview = STATUS_AUTO;
@@ -67,6 +68,11 @@ static void status_task(void *arg)
         case STATUS_ERROR:
             c[0] = MAX_LEVEL;
             break;
+        case STATUS_HOLD: {
+            int period = s_hold >= 100 ? 0 : 800 - 6 * s_hold;    // 800 ms -> 200 ms
+            if (!period || (now % period) < period / 2) { c[0] = MAX_LEVEL; c[1] = MAX_LEVEL / 3; }
+            break;
+        }
         case STATUS_SERVER_DOWN:
             if (now % 5000 < 150) c[0] = MAX_LEVEL / 2;
             break;
@@ -88,6 +94,7 @@ esp_err_t status_start(void)
 }
 
 void status_set_voice(status_t s) { s_voice = s; }
+void status_set_hold(int progress) { s_hold = progress; }
 
 void status_preview(status_t s, int seconds)
 {
