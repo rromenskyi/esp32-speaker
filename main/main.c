@@ -5,6 +5,7 @@
 #include "board.h"
 #include "buttons.h"
 #include "leds.h"
+#include "status.h"
 #include "console.h"
 #include "es7210.h"
 #include "es8311.h"
@@ -72,12 +73,7 @@ void app_main(void)
     }
     es7210_init(BOARD_ADDR_ES7210);
     buttons_start(NULL);
-    // Case LEDs: WS2812 chain on the LED pin. Dim blue flash at boot.
-    if (leds_init(BOARD_LED, BOARD_LED_COUNT) == ESP_OK) {
-        leds_fill(BOARD_LED_COUNT, 0, 0, 24);
-        vTaskDelay(pdMS_TO_TICKS(300));
-        leds_fill(0, 0, 0, 0);
-    }
+    if (leds_init(BOARD_LED, BOARD_LED_COUNT) == ESP_OK) status_start();
 
     console_start();
 }

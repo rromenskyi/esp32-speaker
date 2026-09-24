@@ -69,9 +69,13 @@ buttons are active low; `main/buttons.c` polls them every 20 ms with debouncing.
 ### LEDs
 
 The case has **7 individually addressable WS2812-type RGB LEDs** in one chain on
-GPIO38 (GRB byte order, 800 kHz), driven by RMT in `main/leds.c`. A small green
+GPIO38 (**RGB** byte order — not the usual GRB; 800 kHz), driven by RMT in `main/leds.c`. A small green
 LED next to the USB connector is not software-controlled (likely the charger's
 status LED).
+
+Network state on the LEDs (`main/status.c`): provisioning AP up — green blink
+(1 Hz); joining the saved network — slow blue breathing; just connected — green
+for 2 s, then off. `status <state> [s]` on the console previews a pattern.
 
 ### Audio bus
 

@@ -22,8 +22,12 @@ esp_err_t leds_init(int gpio, int max_leds)
         .gpio_num = gpio,
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = RES_HZ,
-        .mem_block_symbols = 64,
+        // DMA: the whole frame goes out without CPU refills. With a 64-symbol
+        // ping-pong buffer, refill interrupts delayed by Wi-Fi load stretched a
+        // low gap past the latch time and the LEDs showed shifted colors.
+        .mem_block_symbols = 1024,
         .trans_queue_depth = 2,
+        .flags.with_dma = true,
     };
     ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&cc, &s_chan), TAG, "channel");
     // WS2812 bit timing: 0 = 0.3 us high / 0.9 us low, 1 = 0.9 us high / 0.3 us low.
@@ -40,8 +44,10 @@ esp_err_t leds_init(int gpio, int max_leds)
 esp_err_t leds_set(int i, uint8_t r, uint8_t g, uint8_t b)
 {
     if (i < 0 || i >= s_max) return ESP_ERR_INVALID_ARG;
-    s_grb[3 * i] = g;
-    s_grb[3 * i + 1] = r;
+    // These LEDs take RGB byte order (not the usual WS2812 GRB): verified by
+    // sending pure green and seeing red.
+    s_grb[3 * i] = r;
+    s_grb[3 * i + 1] = g;
     s_grb[3 * i + 2] = b;
     return ESP_OK;
 }

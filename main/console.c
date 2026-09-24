@@ -13,6 +13,7 @@
 #include "esp_console.h"
 #include "i2c_bus.h"
 #include "leds.h"
+#include "status.h"
 #include "settings.h"
 #include "tca9555.h"
 #include "wifi.h"
@@ -215,6 +216,15 @@ static int cmd_led(int argc, char **argv)
     return 1;
 }
 
+static int cmd_status(int argc, char **argv)
+{
+    static const char *const names[] = {"off", "portal", "connecting", "connected"};
+    for (int i = 0; argc > 1 && i < 4; i++)
+        if (!strcmp(argv[1], names[i])) { status_preview(i, argc > 2 ? num(argv[2]) : 8); return 0; }
+    printf("status <off|portal|connecting|connected> [seconds]\n");
+    return 1;
+}
+
 static int cmd_px(int argc, char **argv)
 {
     // px <index> <r> <g> <b>: light one pixel, everything else off.
@@ -249,6 +259,7 @@ void console_start(void)
         {.command = "token", .help = "token <value>|-: set/clear the HTTP API token", .func = cmd_token},
         {.command = "reboot", .help = "restart the device", .func = cmd_reboot},
         {.command = "led",  .help = "led [count] <r> <g> <b>: case LEDs", .func = cmd_led},
+        {.command = "status", .help = "status <state> [s]: preview an LED status pattern", .func = cmd_status},
         {.command = "px",   .help = "px <index> <r> <g> <b>: light one pixel only", .func = cmd_px},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
