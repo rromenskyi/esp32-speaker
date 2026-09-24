@@ -6,6 +6,7 @@
 #include "buttons.h"
 #include "leds.h"
 #include "status.h"
+#include "voice.h"
 #include "console.h"
 #include "es7210.h"
 #include "es8311.h"
@@ -72,8 +73,9 @@ void app_main(void)
         audio_tone(1320, 150, 6000);
     }
     es7210_init(BOARD_ADDR_ES7210);
-    buttons_start(NULL);
     if (leds_init(BOARD_LED, BOARD_LED_COUNT) == ESP_OK) status_start();
+    voice_start();
+    buttons_start(voice_on_button);
 
     console_start();
 }

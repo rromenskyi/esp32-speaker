@@ -19,6 +19,7 @@ static StreamBufferHandle_t s_log;       // log lines waiting for the client
 static SemaphoreHandle_t s_log_lock;     // stream buffers allow one writer at a time
 static vprintf_like_t s_orig_vprintf;
 static volatile int s_client = -1;
+static TaskHandle_t s_task;
 
 // Log hook: goes to the original sink (USB) and, without ever blocking, into a
 // buffer the console task drains to the socket. Logging happens from lwip and
@@ -28,7 +29,8 @@ static int log_vprintf(const char *fmt, va_list ap)
     va_list ap2;
     va_copy(ap2, ap);
     int r = s_orig_vprintf(fmt, ap);
-    if (s_client >= 0) {
+    // The console task's own logs already reach the socket through its stdout.
+    if (s_client >= 0 && xTaskGetCurrentTaskHandle() != s_task) {
         char line[256];
         int n = vsnprintf(line, sizeof(line), fmt, ap2);
         if (n > (int)sizeof(line) - 1) n = sizeof(line) - 1;
@@ -131,5 +133,5 @@ esp_err_t netconsole_start(void)
     s_log = xStreamBufferCreate(LOG_BUF, 1);
     s_log_lock = xSemaphoreCreateMutex();
     s_orig_vprintf = esp_log_set_vprintf(log_vprintf);
-    return xTaskCreate(netconsole_task, "netcon", 6144, NULL, 5, NULL) == pdPASS ? ESP_OK : ESP_FAIL;
+    return xTaskCreate(netconsole_task, "netcon", 6144, NULL, 5, &s_task) == pdPASS ? ESP_OK : ESP_FAIL;
 }

@@ -4,9 +4,10 @@ Open firmware for the ESP32-S3 smart speakers sold on AliExpress (Waveshare
 ESP32-S3-AUDIO-Board internals). The goal is to make the speaker a voice
 front-end for your own LLM agents: microphone array in, speech out, over Wi-Fi.
 
-> Status: **bring-up** — speaker, mic array, buttons, Wi-Fi, push OTA with
-> rollback and a telnet console work. The audio pipeline and server protocol
-> are next.
+> Status: **first voice loop works** — push-to-talk on k1 streams the mic to a
+> server over WebSocket and plays the server's audio back
+> ([protocol](docs/PROTOCOL.md), [reference echo server](server/echo_server.py)).
+> Echo cancellation, a wake word and Opus are next.
 
 ## Hardware
 
@@ -55,6 +56,18 @@ its LAN — don't expose it to the internet.
 A pushed image boots unconfirmed: it is kept only once Wi-Fi has been up for
 15 s. If that doesn't happen within 2 minutes the speaker reboots and the
 bootloader rolls back to the previous image.
+
+## Talking to a server
+
+```sh
+pip install -r server/requirements.txt
+python server/echo_server.py --port 8790          # plays every utterance back
+```
+
+On the device console: `server ws://<server-ip>:8790/`. Hold **k1**, speak,
+release: the utterance goes to the server and its reply is played. **k2 / k3**
+are volume − / +. LEDs: blue = listening, purple = thinking, green = speaking,
+short red pulse every 5 s = server unreachable.
 
 ## CI
 

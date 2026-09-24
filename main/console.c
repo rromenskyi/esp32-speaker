@@ -14,6 +14,7 @@
 #include "i2c_bus.h"
 #include "leds.h"
 #include "status.h"
+#include "voice.h"
 #include "settings.h"
 #include "tca9555.h"
 #include "wifi.h"
@@ -218,11 +219,23 @@ static int cmd_led(int argc, char **argv)
 
 static int cmd_status(int argc, char **argv)
 {
-    static const char *const names[] = {"off", "portal", "connecting", "connected"};
-    for (int i = 0; argc > 1 && i < 4; i++)
+    static const char *const names[] = {"off", "portal", "connecting", "connected", "listening",
+                                        "thinking", "speaking", "error", "serverdown"};
+    for (int i = 0; argc > 1 && i < 9; i++)
         if (!strcmp(argv[1], names[i])) { status_preview(i, argc > 2 ? num(argv[2]) : 8); return 0; }
-    printf("status <off|portal|connecting|connected> [seconds]\n");
+    printf("status <off|portal|connecting|connected|listening|thinking|speaking|error|serverdown> [s]\n");
     return 1;
+}
+
+static int cmd_server(int argc, char **argv)
+{
+    // server: show; server <url> [token]: set and reconnect; server -: disable.
+    if (argc >= 2)
+        return voice_set_server(strcmp(argv[1], "-") ? argv[1] : NULL, argc > 2 ? argv[2] : NULL) == ESP_OK ? 0 : 1;
+    char buf[256];
+    voice_describe(buf, sizeof(buf));
+    printf("%s\n", buf);
+    return 0;
 }
 
 static int cmd_px(int argc, char **argv)
@@ -260,6 +273,7 @@ void console_start(void)
         {.command = "reboot", .help = "restart the device", .func = cmd_reboot},
         {.command = "led",  .help = "led [count] <r> <g> <b>: case LEDs", .func = cmd_led},
         {.command = "status", .help = "status <state> [s]: preview an LED status pattern", .func = cmd_status},
+        {.command = "server", .help = "server [<ws-url> [token] | -]: voice server", .func = cmd_server},
         {.command = "px",   .help = "px <index> <r> <g> <b>: light one pixel only", .func = cmd_px},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)

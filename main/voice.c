@@ -1,0 +1,276 @@
+// Device side of docs/PROTOCOL.md: WebSocket link to the server, microphone
+// streaming while listening, playback of server audio, push-to-talk on k1.
+#include "voice.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "audio.h"
+#include "board.h"
+#include "cJSON.h"
+#include "es8311.h"
+#include "esp_app_desc.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_websocket_client.h"
+#include "settings.h"
+#include "status.h"
+#include "wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
+static const char *TAG = "voice";
+
+#define FRAME_SAMPLES     320               // 20 ms at 16 kHz
+#define MAX_LISTEN_MS     15000             // hard cap on one utterance
+#define THINK_TIMEOUT_MS  20000             // no reply by then: back to idle
+#define MIC_SLOT          0                 // raw mic until echo cancellation lands
+
+typedef enum { ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING } state_t;
+static const char *const ST_NAME[] = {"idle", "listening", "thinking", "speaking"};
+
+static esp_websocket_client_handle_t s_ws;
+static SemaphoreHandle_t s_lock;            // guards state + client handle
+static volatile state_t s_state = ST_IDLE;
+static volatile bool s_linked;              // WebSocket connected and hello sent
+static volatile bool s_speak_stopped;       // server sent speak stop for this turn
+static int64_t s_state_since_ms;
+static char s_url[160];
+
+static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
+
+static void set_state(state_t st)
+{
+    s_state = st;
+    s_state_since_ms = now_ms();
+    static const status_t led[] = {STATUS_OFF, STATUS_LISTENING, STATUS_THINKING, STATUS_SPEAKING};
+    status_set_voice(s_linked || !s_url[0] ? led[st] : STATUS_SERVER_DOWN);
+    ESP_LOGI(TAG, "state: %s", ST_NAME[st]);
+}
+
+static void send_json(const char *json)
+{
+    if (s_ws && s_linked) esp_websocket_client_send_text(s_ws, json, strlen(json), pdMS_TO_TICKS(500));
+}
+
+static void send_listen(const char *state, const char *reason)
+{
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"type\":\"listen\",\"state\":\"%s\",\"reason\":\"%s\"}", state, reason);
+    send_json(buf);
+}
+
+static void start_listening(const char *reason)
+{
+    if (!s_linked) { status_set_voice(STATUS_ERROR); return; }
+    if (s_state == ST_SPEAKING) {
+        audio_play_flush();
+        send_json("{\"type\":\"abort\",\"reason\":\"barge_in\"}");
+    }
+    send_listen("start", reason);
+    set_state(ST_LISTENING);
+}
+
+static void stop_listening(const char *reason)
+{
+    if (s_state != ST_LISTENING) return;
+    send_listen("stop", reason);
+    set_state(ST_THINKING);
+}
+
+#define VOLUME_STEP     10
+#define VOLUME_DEFAULT  80
+
+static int s_volume = VOLUME_DEFAULT;
+
+static void set_volume(int v, bool beep)
+{
+    s_volume = v < 0 ? 0 : v > 100 ? 100 : v;
+    es8311_set_volume(s_volume);
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d", s_volume);
+    settings_set_str("volume", buf);
+    ESP_LOGI(TAG, "volume %d", s_volume);
+    if (beep && s_state != ST_SPEAKING) audio_tone(880, 60, 8000);
+}
+
+void voice_on_button(button_t b, bool pressed)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (b == BUTTON_K1) {
+        if (pressed) start_listening("button");
+        else stop_listening("button");
+    } else if (b == BUTTON_K2 || b == BUTTON_K3) {
+        // Volume -/+ is handled locally; neither edge goes to the server.
+        if (pressed) set_volume(s_volume + (b == BUTTON_K3 ? VOLUME_STEP : -VOLUME_STEP), true);
+    } else {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "{\"type\":\"button\",\"name\":\"%s\",\"action\":\"%s\"}",
+                 button_name(b), pressed ? "press" : "release");
+        send_json(buf);
+    }
+    xSemaphoreGive(s_lock);
+}
+
+static void handle_text(const char *data, int len)
+{
+    cJSON *j = cJSON_ParseWithLength(data, len);
+    if (!j) return;
+    const char *type = cJSON_GetStringValue(cJSON_GetObjectItem(j, "type"));
+    const char *st = cJSON_GetStringValue(cJSON_GetObjectItem(j, "state"));
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!type) {
+    } else if (!strcmp(type, "hello")) {
+        ESP_LOGI(TAG, "server hello, session %s", cJSON_GetStringValue(cJSON_GetObjectItem(j, "session")) ?: "-");
+    } else if (!strcmp(type, "speak") && st && !strcmp(st, "start")) {
+        s_speak_stopped = false;
+        if (s_state == ST_LISTENING) send_listen("stop", "server");
+        set_state(ST_SPEAKING);
+    } else if (!strcmp(type, "speak") && st && !strcmp(st, "stop")) {
+        s_speak_stopped = true;
+    } else if (!strcmp(type, "listen") && st && !strcmp(st, "start")) {
+        start_listening("server");
+    } else if (!strcmp(type, "listen") && st && !strcmp(st, "stop")) {
+        if (s_state == ST_LISTENING) set_state(ST_THINKING);
+    } else if (!strcmp(type, "thinking")) {
+        if (s_state != ST_SPEAKING) set_state(ST_THINKING);
+    } else if (!strcmp(type, "set")) {
+        cJSON *v = cJSON_GetObjectItem(j, "volume");
+        if (cJSON_IsNumber(v)) set_volume(v->valueint, false);
+    } else if (!strcmp(type, "error")) {
+        ESP_LOGW(TAG, "server error: %s", cJSON_GetStringValue(cJSON_GetObjectItem(j, "message")) ?: "?");
+        audio_play_flush();
+        set_state(ST_IDLE);
+        status_set_voice(STATUS_ERROR);
+    }
+    xSemaphoreGive(s_lock);
+    cJSON_Delete(j);
+}
+
+static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    esp_websocket_event_data_t *e = data;
+    switch (id) {
+    case WEBSOCKET_EVENT_CONNECTED: {
+        char hello[320];
+        snprintf(hello, sizeof(hello),
+                 "{\"type\":\"hello\",\"protocol\":1,\"device\":\"%s\",\"firmware\":\"%s\","
+                 "\"audio\":{\"codec\":\"pcm16\",\"rate\":%d,\"channels\":1,\"frame_ms\":20},"
+                 "\"capabilities\":{\"buttons\":[\"k1\",\"k2\",\"k3\",\"boot\"],\"leds\":%d}}",
+                 wifi_hostname(), esp_app_get_description()->version, BOARD_SAMPLE_RATE, BOARD_LED_COUNT);
+        s_linked = true;
+        send_json(hello);
+        ESP_LOGI(TAG, "linked to %s", s_url);
+        set_state(ST_IDLE);
+        break;
+    }
+    case WEBSOCKET_EVENT_DISCONNECTED:
+    case WEBSOCKET_EVENT_CLOSED:
+        if (s_linked) ESP_LOGW(TAG, "link lost");
+        s_linked = false;
+        audio_play_flush();
+        set_state(ST_IDLE);
+        break;
+    case WEBSOCKET_EVENT_DATA:
+        if (e->op_code == 0x1) {
+            handle_text(e->data_ptr, e->data_len);
+        } else if ((e->op_code == 0x2 || e->op_code == 0x0) && s_state == ST_SPEAKING) {
+            // Blocks when the playback buffer is full: that stalls the socket
+            // reader, which is exactly the TCP back pressure the protocol wants.
+            audio_write_bytes(e->data_ptr, e->data_len);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+// Reads the mic continuously (keeps the RX DMA fresh) and streams 20 ms frames
+// while listening. Also drives the timeouts and the "speak done" report.
+static void mic_task(void *arg)
+{
+    static int16_t tdm[FRAME_SAMPLES * AUDIO_MIC_SLOTS];
+    static int16_t mono[FRAME_SAMPLES];
+    for (;;) {
+        audio_read(tdm, FRAME_SAMPLES);
+        state_t st = s_state;
+        if (st == ST_LISTENING && s_linked) {
+            for (int i = 0; i < FRAME_SAMPLES; i++) mono[i] = tdm[i * AUDIO_MIC_SLOTS + MIC_SLOT];
+            esp_websocket_client_send_bin(s_ws, (const char *)mono, sizeof(mono), pdMS_TO_TICKS(100));
+        }
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        // Read the state age under the lock: a button can change state between
+        // frames, and a stale age once aborted fresh utterances as "timeout".
+        int64_t in_state = now_ms() - s_state_since_ms;
+        if (s_state == ST_LISTENING && in_state > MAX_LISTEN_MS) stop_listening("timeout");
+        else if (s_state == ST_THINKING && in_state > THINK_TIMEOUT_MS) set_state(ST_IDLE);
+        else if (s_state == ST_SPEAKING && s_speak_stopped && audio_play_idle()) {
+            send_json("{\"type\":\"speak\",\"state\":\"done\"}");
+            set_state(ST_IDLE);
+        }
+        xSemaphoreGive(s_lock);
+    }
+}
+
+static void link_start(void)
+{
+    char token[96] = "", headers[128] = "";
+    if (settings_get_str("server_url", s_url, sizeof(s_url)) != ESP_OK || !s_url[0]) {
+        s_url[0] = 0;
+        ESP_LOGW(TAG, "no server configured (console: server <ws://host:port/path> [token])");
+        return;
+    }
+    if (settings_get_str("server_token", token, sizeof(token)) == ESP_OK && token[0])
+        snprintf(headers, sizeof(headers), "Authorization: Bearer %s\r\n", token);
+    esp_websocket_client_config_t cfg = {
+        .uri = s_url,
+        .headers = headers[0] ? headers : NULL,
+        .buffer_size = 2048,
+        .reconnect_timeout_ms = 3000,
+        .network_timeout_ms = 5000,
+        .ping_interval_sec = 10,
+        .pingpong_timeout_sec = 25,
+        .task_stack = 6144,
+    };
+    s_ws = esp_websocket_client_init(&cfg);
+    esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
+    esp_websocket_client_start(s_ws);
+    status_set_voice(STATUS_SERVER_DOWN);
+    ESP_LOGI(TAG, "connecting to %s", s_url);
+}
+
+esp_err_t voice_start(void)
+{
+    s_lock = xSemaphoreCreateMutex();
+    char vol[8];
+    if (settings_get_str("volume", vol, sizeof(vol)) == ESP_OK) s_volume = atoi(vol);
+    es8311_set_volume(s_volume);
+    link_start();
+    return xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 15, NULL, 1) == pdPASS ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t voice_set_server(const char *url, const char *token)
+{
+    esp_err_t err = url && url[0] ? settings_set_str("server_url", url) : settings_erase("server_url");
+    if (err == ESP_OK) err = token && token[0] ? settings_set_str("server_token", token) : settings_erase("server_token");
+    if (err != ESP_OK) return err;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_ws) {
+        esp_websocket_client_handle_t old = s_ws;
+        s_ws = NULL;
+        s_linked = false;
+        xSemaphoreGive(s_lock);
+        esp_websocket_client_stop(old);
+        esp_websocket_client_destroy(old);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+    }
+    link_start();
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
+void voice_describe(char *out, size_t len)
+{
+    snprintf(out, len, "server=%s link=%s state=%s", s_url[0] ? s_url : "(none)",
+             s_linked ? "up" : "down", ST_NAME[s_state]);
+}

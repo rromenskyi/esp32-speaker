@@ -18,13 +18,15 @@ static const char *TAG = "audio";
 // that never lets the I2S DMA run dry: it writes silence when there is nothing
 // to play. Letting TX underrun makes the next write land in a descriptor that is
 // already playing, which is audible as a click.
-#define PLAY_BUF_BYTES  (16000 * 2)          // 1 s of mono 16-bit at 16 kHz
+#define PLAY_BUF_BYTES  (16000 * 2 * 4)      // 4 s of mono 16-bit at 16 kHz
 #define PLAY_CHUNK      256                  // samples per I2S write (16 ms)
 #define SLOTS           AUDIO_MIC_SLOTS
 
 static i2s_chan_handle_t s_tx, s_rx;
 static uint32_t s_rate;
 static StreamBufferHandle_t s_play;
+static volatile bool s_discard;         // set while flushing: writers drop data
+static volatile bool s_playing;         // play task emitted real samples last chunk
 
 static void play_task(void *arg)
 {
@@ -32,6 +34,7 @@ static void play_task(void *arg)
     int16_t frame[PLAY_CHUNK * SLOTS] = {0};
     for (;;) {
         size_t got = xStreamBufferReceive(s_play, mono, sizeof(mono), pdMS_TO_TICKS(5)) / 2;
+        s_playing = got > 0;
         for (size_t i = 0; i < PLAY_CHUNK; i++) {
             int16_t v = i < got ? mono[i] : 0;
             frame[SLOTS * i] = v;         // left half of the frame -> ES8311 left
@@ -76,14 +79,33 @@ esp_err_t audio_init(uint32_t sample_rate)
 
 esp_err_t audio_write_mono(const int16_t *pcm, size_t samples)
 {
-    const uint8_t *p = (const uint8_t *)pcm;
-    size_t left = samples * 2;
-    while (left) {
-        size_t n = xStreamBufferSend(s_play, p, left, portMAX_DELAY);
+    return audio_write_bytes(pcm, samples * 2);
+}
+
+esp_err_t audio_write_bytes(const void *data, size_t len)
+{
+    const uint8_t *p = data;
+    while (len && !s_discard) {
+        // Short timeouts so a flush can interrupt a writer blocked on a full buffer.
+        size_t n = xStreamBufferSend(s_play, p, len, pdMS_TO_TICKS(20));
         p += n;
-        left -= n;
+        len -= n;
     }
     return ESP_OK;
+}
+
+void audio_play_flush(void)
+{
+    s_discard = true;
+    // Reset fails while a task is blocked on the buffer; writers give up within
+    // 20 ms once s_discard is set and the reader only waits 5 ms.
+    for (int i = 0; i < 50 && xStreamBufferReset(s_play) != pdPASS; i++) vTaskDelay(pdMS_TO_TICKS(5));
+    s_discard = false;
+}
+
+bool audio_play_idle(void)
+{
+    return xStreamBufferIsEmpty(s_play) && !s_playing;
 }
 
 esp_err_t audio_read(int16_t *frames, size_t frames_count)

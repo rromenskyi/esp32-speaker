@@ -12,6 +12,7 @@
 #define MAX_LEVEL        60      // keep it gentle; the LEDs are bright
 
 static volatile status_t s_preview = STATUS_AUTO;
+static volatile status_t s_voice = STATUS_OFF;
 static volatile int64_t s_preview_until;
 
 static void fill(uint8_t r, uint8_t g, uint8_t b) { leds_fill(BOARD_LED_COUNT, r, g, b); }
@@ -29,6 +30,7 @@ static void status_task(void *arg)
         if (autos == STATUS_CONNECTED && prev_auto != STATUS_CONNECTED) connected_at = now;
         prev_auto = autos;
         if (autos == STATUS_CONNECTED && now - connected_at > CONNECTED_SHOW_MS) autos = STATUS_OFF;
+        if (autos == STATUS_OFF) autos = s_voice;
 
         shown = autos;
         if (s_preview != STATUS_AUTO) {
@@ -49,6 +51,25 @@ static void status_task(void *arg)
         case STATUS_CONNECTED:
             c[1] = MAX_LEVEL;
             break;
+        case STATUS_LISTENING:
+            c[2] = MAX_LEVEL;
+            break;
+        case STATUS_THINKING: {
+            float phase = (now % 1200) / 1200.0f;
+            float k = 0.15f + 0.85f * (0.5f - 0.5f * cosf(2 * (float)M_PI * phase));
+            c[0] = (uint8_t)(MAX_LEVEL * 0.6f * k);
+            c[2] = (uint8_t)(MAX_LEVEL * k);
+            break;
+        }
+        case STATUS_SPEAKING:
+            c[1] = MAX_LEVEL / 3;
+            break;
+        case STATUS_ERROR:
+            c[0] = MAX_LEVEL;
+            break;
+        case STATUS_SERVER_DOWN:
+            if (now % 5000 < 150) c[0] = MAX_LEVEL / 2;
+            break;
         default:
             break;
         }
@@ -65,6 +86,8 @@ esp_err_t status_start(void)
 {
     return xTaskCreate(status_task, "status", 3072, NULL, 3, NULL) == pdPASS ? ESP_OK : ESP_FAIL;
 }
+
+void status_set_voice(status_t s) { s_voice = s; }
 
 void status_preview(status_t s, int seconds)
 {

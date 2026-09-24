@@ -8,3 +8,7 @@ dependencies.lock.tmp
 
 # Never commit vendor flash dumps
 *.bin
+
+# Echo server recordings
+recordings/
+__pycache__/
