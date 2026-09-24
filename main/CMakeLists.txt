@@ -1,3 +1,4 @@
-idf_component_register(SRCS "main.c"
+idf_component_register(SRCS "main.c" "i2c_bus.c" "tca9555.c" "es8311.c" "audio.c" "console.c"
                        INCLUDE_DIRS "."
-                       REQUIRES esp_psram spi_flash app_update esp_system)
+                       REQUIRES esp_psram spi_flash app_update esp_system esp_driver_i2c
+                                esp_driver_i2s esp_driver_gpio console)

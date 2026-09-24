@@ -26,31 +26,40 @@ ota_0    app  ota_0   0x100000 6M
 ota_1    app  ota_1   0x700000 6M
 ```
 
-## Pin map (from the xiaozhi board profile — to be verified on hardware)
+## Pin map
 
-| Function | GPIO |
-|----------|------|
-| I2S MCLK / BCLK / WS | 12 / 13 / 14 |
-| I2S DIN (mic, from ES7210) / DOUT (to ES8311) | 15 / 16 |
-| I2C SCL / SDA (codecs, IO expander, touch) | 10 / 11 |
-| BOOT button | 0 |
-| LED | 38 |
-| LCD SPI SCLK / MOSI / CS / DC (JD9853 320x172 or ST7789 240x320) | 4 / 9 / 3 / 7 |
-| LCD backlight (PWM) | 5 |
-| Camera DVP (optional) | XCLK 43, PCLK 44, VSYNC 21, HREF 1, D0-D7 2,17,18,39,45,46,47,48 |
+"✅" = verified on the device with this firmware.
 
-Audio chain: **ES8311** DAC (speaker, with PA) + **ES7210** 4-ch ADC (mic array,
-with a hardware loopback reference channel for echo cancellation). Both codecs
-share one I2S bus at the xiaozhi default 24 kHz.
+| Function | GPIO | |
+|----------|------|---|
+| I2C SCL / SDA (codecs, IO expander) | 10 / 11 | ✅ |
+| I2S MCLK / BCLK / WS | 12 / 13 / 14 | ✅ |
+| I2S DOUT (to ES8311, speaker) | 16 | ✅ |
+| I2S DIN (from ES7210, mic array) | 15 | |
+| BOOT button | 0 | |
+| LED | 38 | |
 
-### TCA9555 IO expander (I2C, address 0x20)
+There is no display on this board.
 
-| Pin | Function |
-|-----|----------|
-| EXIO0, EXIO1 | LCD / touch reset |
-| EXIO5 | camera reset |
-| EXIO6 | camera power (active high) |
-| EXIO8 | speaker power amplifier enable (active high) |
+### I2C bus (100 kHz)
+
+| Address | Device | |
+|---------|--------|---|
+| 0x18 | ES8311 mono codec, speaker DAC (chip id 83 11, rev 01) | ✅ |
+| 0x20 | TCA9555 16-bit IO expander | ✅ |
+| 0x40 | ES7210 4-channel mic ADC | ✅ (responds) |
+| 0x51 | unidentified (likely an RTC) | |
+
+### TCA9555 IO expander
+
+| Pin | Function | |
+|-----|----------|---|
+| P10 (EXIO8) | speaker power amplifier enable, active high | ✅ |
+
+At boot all inputs read high except P05.
+
+Audio: ES8311 runs as I2S slave from the S3's MCLK (256 × fs), 16-bit Philips
+I2S, 16 kHz. The ES7210 will share the same I2S bus in TDM mode.
 
 ## Flashing notes
 
