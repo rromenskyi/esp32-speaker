@@ -64,6 +64,10 @@ pip install -r server/requirements.txt
 python server/echo_server.py --port 8790          # plays every utterance back
 ```
 
+`server/fake_device.py` plays the device's part without hardware — it sends one
+utterance (a WAV file, or text spoken by macOS `say`) and saves the reply:
+`python server/fake_device.py ws://<server>/api/device --say "Который час?"`.
+
 On the device console: `server ws://<server-ip>:8790/`. Hold **k1**, speak,
 release: the utterance goes to the server and its reply is played. **k2 / k3**
 are volume − / +. LEDs: blue = listening, purple = thinking, green = speaking,
