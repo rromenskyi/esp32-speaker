@@ -4,7 +4,7 @@ Open firmware for the ESP32-S3 smart speakers sold on AliExpress (Waveshare
 ESP32-S3-AUDIO-Board internals). The goal is to make the speaker a voice
 front-end for your own LLM agents: microphone array in, speech out, over Wi-Fi.
 
-> Status: **bring-up** — speaker playback works (own ES8311 driver); microphones next.
+> Status: **bring-up** — speaker playback and the mic array work (own ES8311 / ES7210 drivers). Wi-Fi, OTA and the audio pipeline are next.
 
 ## Hardware
 

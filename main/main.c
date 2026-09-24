@@ -4,6 +4,7 @@
 #include "audio.h"
 #include "board.h"
 #include "console.h"
+#include "es7210.h"
 #include "es8311.h"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -58,6 +59,7 @@ void app_main(void)
         audio_tone(880, 150, 6000);
         audio_tone(1320, 150, 6000);
     }
+    es7210_init(BOARD_ADDR_ES7210);
 
     console_start();
 }

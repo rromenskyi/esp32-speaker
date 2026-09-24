@@ -2,13 +2,19 @@
 // toggle expander pins — iterate on the hardware without reflashing.
 #include "console.h"
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
+#include <string.h>
+#include "es7210.h"
+#include "esp_heap_caps.h"
 #include "audio.h"
 #include "board.h"
 #include "es8311.h"
 #include "esp_console.h"
 #include "i2c_bus.h"
 #include "tca9555.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static long num(const char *s) { return strtol(s, NULL, 0); }
 
@@ -61,6 +67,119 @@ static int cmd_exio(int argc, char **argv)
     return 0;
 }
 
+// --- microphone bring-up -------------------------------------------------
+
+#define REC_MAX_MS 5000
+static int16_t *s_rec;        // mono recording of one slot, PSRAM
+static size_t s_rec_len;
+
+// Capture `ms` of audio, print RMS/peak per TDM slot. The first 20 ms are
+// discarded: RX runs unattended between commands and its DMA holds stale data.
+static void measure(int ms)
+{
+    enum { CHUNK = 160 };                           // 10 ms
+    static int16_t buf[CHUNK * AUDIO_MIC_SLOTS];
+    double sum[AUDIO_MIC_SLOTS] = {0};
+    int peak[AUDIO_MIC_SLOTS] = {0};
+    size_t n = 0;
+    for (int i = 0; i < 2; i++) audio_read(buf, CHUNK);
+    for (int t = 0; t < ms; t += 10) {
+        audio_read(buf, CHUNK);
+        for (int i = 0; i < CHUNK; i++)
+            for (int c = 0; c < AUDIO_MIC_SLOTS; c++) {
+                int v = buf[i * AUDIO_MIC_SLOTS + c];
+                sum[c] += (double)v * v;
+                if (abs(v) > peak[c]) peak[c] = abs(v);
+            }
+        n += CHUNK;
+    }
+    for (int c = 0; c < AUDIO_MIC_SLOTS; c++) {
+        double rms = sqrt(sum[c] / n);
+        printf("  slot %d: rms %6.1f dBFS  peak %5d\n", c, rms > 0 ? 20 * log10(rms / 32768) : -120.0, peak[c]);
+    }
+}
+
+static int cmd_mic(int argc, char **argv)
+{
+    measure(argc > 1 ? num(argv[1]) : 1000);
+    return 0;
+}
+
+static int cmd_loop(int argc, char **argv)
+{
+    int hz = argc > 1 ? num(argv[1]) : 1000;
+    audio_tone(hz, 900, 8000);        // fits in the 1 s play queue, returns at once
+    vTaskDelay(pdMS_TO_TICKS(150));
+    measure(600);
+    return 0;
+}
+
+static int cmd_gain(int argc, char **argv)
+{
+    if (argc < 3) { printf("gain <mic 1..4 | -1> <dB 0..37>\n"); return 1; }
+    return es7210_set_gain(num(argv[1]), num(argv[2])) == ESP_OK ? 0 : 1;
+}
+
+static int cmd_rec(int argc, char **argv)
+{
+    // Records all TDM slots interleaved; `tone` Hz (optional) plays meanwhile.
+    int ms = argc > 1 ? num(argv[1]) : 3000, hz = argc > 2 ? num(argv[2]) : 0;
+    if (ms > REC_MAX_MS) ms = REC_MAX_MS;
+    if (!s_rec) s_rec = heap_caps_malloc(REC_MAX_MS * 16 * 2 * AUDIO_MIC_SLOTS, MALLOC_CAP_SPIRAM);
+    if (!s_rec) return 1;
+    enum { CHUNK = 160 };
+    static int16_t buf[CHUNK * AUDIO_MIC_SLOTS];
+    if (hz) { audio_tone(hz, ms < 900 ? ms + 100 : 900, 8000); vTaskDelay(pdMS_TO_TICKS(100)); }
+    for (int i = 0; i < 2; i++) audio_read(buf, CHUNK);
+    s_rec_len = 0;
+    printf("recording %d ms...\n", ms);
+    for (int t = 0; t < ms; t += 10) {
+        audio_read(buf, CHUNK);
+        memcpy(&s_rec[s_rec_len * AUDIO_MIC_SLOTS], buf, sizeof(buf));
+        s_rec_len += CHUNK;
+    }
+    printf("done, %u frames\n", (unsigned)s_rec_len);
+    return 0;
+}
+
+static int cmd_play(int argc, char **argv)
+{
+    int slot = argc > 1 ? num(argv[1]) : 0;
+    if (!s_rec_len) { printf("nothing recorded\n"); return 1; }
+    // Normalize to -3 dBFS peak (max 40x) so quiet recordings are audible.
+    int peak = 1;
+    for (size_t i = 0; i < s_rec_len; i++) {
+        int v = abs(s_rec[i * AUDIO_MIC_SLOTS + slot]);
+        if (v > peak) peak = v;
+    }
+    float g = 23000.0f / peak;
+    if (g > 40) g = 40;
+    if (g < 1) g = 1;
+    printf("peak %d, playback gain x%.1f\n", peak, g);
+    int16_t mono[160];
+    for (size_t i = 0; i < s_rec_len; i += 160) {
+        size_t n = s_rec_len - i < 160 ? s_rec_len - i : 160;
+        for (size_t k = 0; k < n; k++) mono[k] = (int16_t)(s_rec[(i + k) * AUDIO_MIC_SLOTS + slot] * g);
+        audio_write_mono(mono, n);
+    }
+    return 0;
+}
+
+// Hex dump of the interleaved recording, for offline analysis.
+static int cmd_dump(int argc, char **argv)
+{
+    size_t frames = argc > 1 ? num(argv[1]) : s_rec_len;
+    if (frames > s_rec_len) frames = s_rec_len;
+    printf("DUMP %u\n", (unsigned)frames);
+    const uint16_t *u = (const uint16_t *)s_rec;
+    for (size_t i = 0; i < frames * AUDIO_MIC_SLOTS; i++) {
+        printf("%04x", u[i]);
+        if (i % 32 == 31) printf("\n");
+    }
+    printf("\nEND\n");
+    return 0;
+}
+
 void console_start(void)
 {
     esp_console_repl_t *repl;
@@ -76,6 +195,12 @@ void console_start(void)
         {.command = "tone", .help = "tone [hz] [ms] [amplitude]", .func = cmd_tone},
         {.command = "vol",  .help = "vol <0..100>", .func = cmd_vol},
         {.command = "exio", .help = "exio: read inputs; exio <pin> <0|1>: drive output", .func = cmd_exio},
+        {.command = "mic",  .help = "mic [ms]: RMS/peak per TDM slot", .func = cmd_mic},
+        {.command = "loop", .help = "loop [hz]: play a tone and measure every slot", .func = cmd_loop},
+        {.command = "gain", .help = "gain <mic|-1> <dB>", .func = cmd_gain},
+        {.command = "rec",  .help = "rec [ms] [tone_hz]: record all slots", .func = cmd_rec},
+        {.command = "play", .help = "play [slot]: play one slot of the recording", .func = cmd_play},
+        {.command = "dump", .help = "dump [frames]: hex dump of the recording", .func = cmd_dump},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));

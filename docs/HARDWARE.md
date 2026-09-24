@@ -35,7 +35,7 @@ ota_1    app  ota_1   0x700000 6M
 | I2C SCL / SDA (codecs, IO expander) | 10 / 11 | ✅ |
 | I2S MCLK / BCLK / WS | 12 / 13 / 14 | ✅ |
 | I2S DOUT (to ES8311, speaker) | 16 | ✅ |
-| I2S DIN (from ES7210, mic array) | 15 | |
+| I2S DIN (from ES7210, mic array) | 15 | ✅ |
 | BOOT button | 0 | |
 | LED | 38 | |
 
@@ -47,7 +47,7 @@ There is no display on this board.
 |---------|--------|---|
 | 0x18 | ES8311 mono codec, speaker DAC (chip id 83 11, rev 01) | ✅ |
 | 0x20 | TCA9555 16-bit IO expander | ✅ |
-| 0x40 | ES7210 4-channel mic ADC | ✅ (responds) |
+| 0x40 | ES7210 4-channel mic ADC (chip id 72 10) | ✅ |
 | 0x51 | unidentified (likely an RTC) | |
 
 ### TCA9555 IO expander
@@ -58,8 +58,25 @@ There is no display on this board.
 
 At boot all inputs read high except P05.
 
-Audio: ES8311 runs as I2S slave from the S3's MCLK (256 × fs), 16-bit Philips
-I2S, 16 kHz. The ES7210 will share the same I2S bus in TDM mode.
+### Audio bus
+
+Both codecs are I2S slaves on one bus driven by the S3: MCLK = 256 × fs,
+16 kHz. The bus runs **TDM, 4 × 16-bit slots, Philips framing (BCLK = 64 × fs)
+in both directions** — TX and RX share BCLK/WS, and the ES7210 needs four slots
+per frame. The ES8311 auto-detects the clock ratio and plays the left half of
+the frame (slot 0).
+
+Capture channels (ES7210, 1×FS TDM, measured on the device):
+
+| Slot | Source | Idle level | With a speaker tone |
+|------|--------|------------|---------------------|
+| 0 | microphone | −70 dBFS | −40 dBFS |
+| 1 | **speaker loopback** (hardware echo reference) | −87 dBFS | −33 dBFS, flat across frequency |
+| 2 | microphone | −70 dBFS | −40 dBFS |
+| 3 | not connected | −87 dBFS | −87 dBFS |
+
+With the PGA at +37 dB, normal speech at 0.5 m peaks around −16 dBFS. The PGA
+scales linearly in 3 dB steps (verified 0 / 15 / 37 dB).
 
 ## Flashing notes
 
@@ -71,5 +88,10 @@ I2S, 16 kHz. The ES7210 will share the same I2S bus in TDM mode.
   factory app boots between chunks (the amp pops, peripherals twitch). Each
   successful `read-flash` is MD5-checked by esptool; confirm the assembled image
   with `esptool verify-flash 0x0 dump.bin`.
+* **Don't let a reset follow a reset on USB-Serial/JTAG.** On macOS, opening the
+  port toggles DTR/RTS (= reset/boot straps). esptool's RTS hard reset followed
+  by a port open can wedge the USB bridge until a power cycle ("No serial data
+  received"). Flash with `--after watchdog-reset`, wait a few seconds, then
+  open a monitor once and keep it open.
 * Keep a full dump of the factory flash before the first write. Vendor dumps are
   not committed to this repo.
