@@ -1,0 +1,10 @@
+# ESP-IDF build output
+build/
+build.*/
+managed_components/
+sdkconfig
+sdkconfig.old
+dependencies.lock.tmp
+
+# Never commit vendor flash dumps
+*.bin
