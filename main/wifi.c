@@ -18,7 +18,7 @@ static const char *TAG = "wifi";
 static char s_host[32];
 static char s_ssid[33];
 static esp_netif_t *s_sta, *s_ap;
-static volatile bool s_connected, s_ap_on;
+static volatile bool s_connected, s_ap_on, s_scanning;
 static int s_retries;
 static esp_timer_handle_t s_join_timer, s_ap_off_timer, s_retry_timer;
 
@@ -40,9 +40,26 @@ static void ap_off_cb(void *arg)
     if (s_connected) ap_enable(false);
 }
 
+// While the provisioning AP is up, every join attempt makes the radio hop to the
+// router's channel and the AP vanishes from phones' network lists. So with the
+// portal open, retry the saved network only rarely and never while a phone is
+// connected to the AP; new credentials from the portal trigger an attempt anyway.
+#define PORTAL_RETRY_MS  (5 * 60 * 1000)
+
+static bool ap_has_clients(void)
+{
+    wifi_sta_list_t l;
+    return s_ap_on && esp_wifi_ap_get_sta_list(&l) == ESP_OK && l.num > 0;
+}
+
 static void retry_cb(void *arg)
 {
-    if (s_ssid[0] && !s_connected) esp_wifi_connect();
+    if (!s_ssid[0] || s_connected || s_scanning) return;
+    if (ap_has_clients()) {
+        esp_timer_start_once(s_retry_timer, PORTAL_RETRY_MS * 1000LL);
+        return;
+    }
+    esp_wifi_connect();
 }
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -51,11 +68,13 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (s_ssid[0]) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *d = data;
-        if (s_connected) ESP_LOGW(TAG, "disconnected (reason %d)", d->reason);
+        ESP_LOGW(TAG, "%s \"%s\" (reason %d%s)", s_connected ? "disconnected from" : "could not join",
+                 s_ssid, d->reason, d->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+                 d->reason == WIFI_REASON_AUTH_FAIL ? ", wrong password?" : "");
         s_connected = false;
-        if (!s_ssid[0]) return;
+        if (!s_ssid[0] || s_scanning) return;
         // Back off up to ~30 s; the portal (if open) keeps working meanwhile.
-        int delay_ms = s_retries < 5 ? 1000 : s_retries < 20 ? 5000 : 30000;
+        int delay_ms = s_ap_on ? PORTAL_RETRY_MS : s_retries < 5 ? 1000 : s_retries < 20 ? 5000 : 30000;
         s_retries++;
         esp_timer_stop(s_retry_timer);
         esp_timer_start_once(s_retry_timer, delay_ms * 1000LL);   // never block the event loop
@@ -106,6 +125,8 @@ esp_err_t wifi_start(void)
         strlcpy((char *)sta.sta.ssid, s_ssid, sizeof(sta.sta.ssid));
         strlcpy((char *)sta.sta.password, pass, sizeof(sta.sta.password));
         sta.sta.threshold.authmode = pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+        sta.sta.pmf_cfg.capable = true;
+        sta.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
     } else {
         s_ssid[0] = 0;
     }
@@ -117,10 +138,13 @@ esp_err_t wifi_start(void)
     ESP_ERROR_CHECK(esp_timer_create(&t2, &s_ap_off_timer));
     ESP_ERROR_CHECK(esp_timer_create(&t3, &s_retry_timer));
 
+    // The AP config can only be set while the AP interface exists, so configure
+    // both in APSTA mode, then drop to STA if a network is saved.
     s_ap_on = !s_ssid[0];
-    ESP_ERROR_CHECK(esp_wifi_set_mode(s_ap_on ? WIFI_MODE_APSTA : WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
+    if (!s_ap_on) ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
     // Default modem power save drops a large share of packets on IDF v6; this is a
     // mains-powered device that streams audio, so keep the radio awake.
@@ -143,6 +167,8 @@ esp_err_t wifi_save_and_connect(const char *ssid, const char *pass)
     strlcpy((char *)sta.sta.ssid, ssid, sizeof(sta.sta.ssid));
     strlcpy((char *)sta.sta.password, pass ? pass : "", sizeof(sta.sta.password));
     sta.sta.threshold.authmode = (pass && pass[0]) ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+    sta.sta.pmf_cfg.capable = true;
+    sta.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
     s_retries = 0;
     esp_wifi_disconnect();
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
@@ -185,11 +211,25 @@ static size_t json_str(char *out, size_t len, const char *s)
 
 int wifi_scan_json(char *out, size_t len)
 {
+    // A scan is refused while the station is busy (re)connecting, so pause the
+    // reconnect loop for its duration. The result is cached for repeat requests.
+    static char cache[3072];
+    static int64_t cache_at;
+    if (cache_at && esp_timer_get_time() - cache_at < 10 * 1000000LL)
+        return snprintf(out, len, "%s", cache);
+
+    s_scanning = true;
+    if (!s_connected) esp_wifi_disconnect();
     wifi_scan_config_t sc = {.show_hidden = false};
-    if (esp_wifi_scan_start(&sc, true) != ESP_OK) return snprintf(out, len, "[]");
+    esp_err_t err = esp_wifi_scan_start(&sc, true);
     uint16_t n = 20;
     wifi_ap_record_t recs[20];
-    esp_wifi_scan_get_ap_records(&n, recs);
+    if (err == ESP_OK) esp_wifi_scan_get_ap_records(&n, recs);
+    else ESP_LOGW(TAG, "scan failed: %s", esp_err_to_name(err));
+    s_scanning = false;
+    if (!s_connected && s_ssid[0]) esp_wifi_connect();
+    if (err != ESP_OK) return snprintf(out, len, "[]");
+
     size_t p = snprintf(out, len, "[");
     for (int i = 0; i < n && p + 80 < len; i++) {
         if (!recs[i].ssid[0]) continue;
@@ -199,5 +239,7 @@ int wifi_scan_json(char *out, size_t len)
         p += snprintf(out + p, len - p, ",\"rssi\":%d,\"auth\":%d}", recs[i].rssi, recs[i].authmode);
     }
     p += snprintf(out + p, len - p, "]");
+    if (p < sizeof(cache)) { memcpy(cache, out, p + 1); cache_at = esp_timer_get_time(); }
+    ESP_LOGI(TAG, "scan: %d networks", n);
     return p;
 }

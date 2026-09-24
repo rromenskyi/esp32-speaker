@@ -4,6 +4,7 @@
 #include "audio.h"
 #include "board.h"
 #include "buttons.h"
+#include "leds.h"
 #include "console.h"
 #include "es7210.h"
 #include "es8311.h"
@@ -71,6 +72,13 @@ void app_main(void)
     }
     es7210_init(BOARD_ADDR_ES7210);
     buttons_start(NULL);
+    // The case LEDs are WS2812s wired in parallel: all show pixel 0. Dim blue
+    // flash at boot.
+    if (leds_init(BOARD_LED, 1) == ESP_OK) {
+        leds_fill(1, 0, 0, 24);
+        vTaskDelay(pdMS_TO_TICKS(300));
+        leds_fill(0, 0, 0, 0);
+    }
 
     console_start();
 }

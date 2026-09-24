@@ -13,7 +13,7 @@
 #define BOARD_I2S_DOUT      GPIO_NUM_16   // to ES8311 (speaker)
 
 #define BOARD_BUTTON_BOOT   GPIO_NUM_0
-#define BOARD_LED           GPIO_NUM_38
+#define BOARD_LED           GPIO_NUM_38   // WS2812 data; all case LEDs in parallel
 
 // 7-bit I2C addresses
 #define BOARD_ADDR_ES8311   0x18

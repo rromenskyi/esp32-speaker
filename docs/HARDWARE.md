@@ -37,7 +37,7 @@ ota_1    app  ota_1   0x700000 6M
 | I2S DOUT (to ES8311, speaker) | 16 | ✅ |
 | I2S DIN (from ES7210, mic array) | 15 | ✅ |
 | BOOT button (4th button on the case) | 0 | ✅ |
-| LED | 38 | |
+| Case LEDs, WS2812 data | 38 | ✅ |
 
 There is no display on this board.
 
@@ -65,6 +65,14 @@ On the case, left to right: **k1, k2, k3, boot, reset**, plus a battery power
 slide switch. k1–k3 are on the TCA9555 (P11–P13), boot is GPIO0 (also the ROM
 download strap), reset is the chip's EN pin (not visible to firmware). All
 buttons are active low; `main/buttons.c` polls them every 20 ms with debouncing.
+
+### LEDs
+
+The case LEDs are WS2812-type RGB LEDs on GPIO38, **wired in parallel** — every
+LED shows the first pixel, so the whole case lights in one color (any RGB,
+brightness, fades). `main/leds.c` drives them with RMT (GRB, 800 kHz). A small
+green LED next to the USB connector is not software-controlled (likely the
+charger's status LED).
 
 ### Audio bus
 

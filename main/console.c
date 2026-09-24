@@ -12,6 +12,7 @@
 #include "es8311.h"
 #include "esp_console.h"
 #include "i2c_bus.h"
+#include "leds.h"
 #include "settings.h"
 #include "tca9555.h"
 #include "wifi.h"
@@ -205,6 +206,13 @@ static int cmd_reboot(int argc, char **argv)
     return 0;
 }
 
+static int cmd_led(int argc, char **argv)
+{
+    // All case LEDs share one color (they are wired in parallel).
+    if (argc < 4) { printf("led <r> <g> <b>\n"); return 1; }
+    return leds_fill(1, num(argv[1]), num(argv[2]), num(argv[3])) == ESP_OK ? 0 : 1;
+}
+
 void console_start(void)
 {
     esp_console_repl_t *repl;
@@ -229,6 +237,7 @@ void console_start(void)
         {.command = "wifi", .help = "wifi: status; wifi <ssid> [pass]: save and join", .func = cmd_wifi},
         {.command = "token", .help = "token <value>|-: set/clear the HTTP API token", .func = cmd_token},
         {.command = "reboot", .help = "restart the device", .func = cmd_reboot},
+        {.command = "led",  .help = "led <r> <g> <b>: case LED color", .func = cmd_led},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
