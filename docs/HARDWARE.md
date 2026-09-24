@@ -68,11 +68,10 @@ buttons are active low; `main/buttons.c` polls them every 20 ms with debouncing.
 
 ### LEDs
 
-The case LEDs are WS2812-type RGB LEDs on GPIO38, **wired in parallel** — every
-LED shows the first pixel, so the whole case lights in one color (any RGB,
-brightness, fades). `main/leds.c` drives them with RMT (GRB, 800 kHz). A small
-green LED next to the USB connector is not software-controlled (likely the
-charger's status LED).
+The case has **7 individually addressable WS2812-type RGB LEDs** in one chain on
+GPIO38 (GRB byte order, 800 kHz), driven by RMT in `main/leds.c`. A small green
+LED next to the USB connector is not software-controlled (likely the charger's
+status LED).
 
 ### Audio bus
 

@@ -72,10 +72,9 @@ void app_main(void)
     }
     es7210_init(BOARD_ADDR_ES7210);
     buttons_start(NULL);
-    // The case LEDs are WS2812s wired in parallel: all show pixel 0. Dim blue
-    // flash at boot.
-    if (leds_init(BOARD_LED, 1) == ESP_OK) {
-        leds_fill(1, 0, 0, 24);
+    // Case LEDs: WS2812 chain on the LED pin. Dim blue flash at boot.
+    if (leds_init(BOARD_LED, BOARD_LED_COUNT) == ESP_OK) {
+        leds_fill(BOARD_LED_COUNT, 0, 0, 24);
         vTaskDelay(pdMS_TO_TICKS(300));
         leds_fill(0, 0, 0, 0);
     }

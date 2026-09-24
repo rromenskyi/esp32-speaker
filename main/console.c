@@ -208,9 +208,20 @@ static int cmd_reboot(int argc, char **argv)
 
 static int cmd_led(int argc, char **argv)
 {
-    // All case LEDs share one color (they are wired in parallel).
-    if (argc < 4) { printf("led <r> <g> <b>\n"); return 1; }
-    return leds_fill(1, num(argv[1]), num(argv[2]), num(argv[3])) == ESP_OK ? 0 : 1;
+    // led <r> <g> <b>: every LED; led <count> <r> <g> <b>: only the first <count>.
+    if (argc == 4) return leds_fill(BOARD_LED_COUNT, num(argv[1]), num(argv[2]), num(argv[3])) == ESP_OK ? 0 : 1;
+    if (argc == 5) return leds_fill(num(argv[1]), num(argv[2]), num(argv[3]), num(argv[4])) == ESP_OK ? 0 : 1;
+    printf("led [count] <r> <g> <b>\n");
+    return 1;
+}
+
+static int cmd_px(int argc, char **argv)
+{
+    // px <index> <r> <g> <b>: light one pixel, everything else off.
+    if (argc < 5) { printf("px <index> <r> <g> <b>\n"); return 1; }
+    leds_fill(0, 0, 0, 0);
+    leds_set(num(argv[1]), num(argv[2]), num(argv[3]), num(argv[4]));
+    return leds_show() == ESP_OK ? 0 : 1;
 }
 
 void console_start(void)
@@ -237,7 +248,8 @@ void console_start(void)
         {.command = "wifi", .help = "wifi: status; wifi <ssid> [pass]: save and join", .func = cmd_wifi},
         {.command = "token", .help = "token <value>|-: set/clear the HTTP API token", .func = cmd_token},
         {.command = "reboot", .help = "restart the device", .func = cmd_reboot},
-        {.command = "led",  .help = "led <r> <g> <b>: case LED color", .func = cmd_led},
+        {.command = "led",  .help = "led [count] <r> <g> <b>: case LEDs", .func = cmd_led},
+        {.command = "px",   .help = "px <index> <r> <g> <b>: light one pixel only", .func = cmd_px},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
