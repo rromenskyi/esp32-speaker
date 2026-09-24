@@ -12,7 +12,10 @@
 #include "es8311.h"
 #include "esp_console.h"
 #include "i2c_bus.h"
+#include "settings.h"
 #include "tca9555.h"
+#include "wifi.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -180,6 +183,28 @@ static int cmd_dump(int argc, char **argv)
     return 0;
 }
 
+static int cmd_wifi(int argc, char **argv)
+{
+    if (argc >= 2) return wifi_save_and_connect(argv[1], argc > 2 ? argv[2] : "") == ESP_OK ? 0 : 1;
+    char st[160];
+    wifi_status(st, sizeof(st));
+    printf("%s\n", st);
+    return 0;
+}
+
+static int cmd_token(int argc, char **argv)
+{
+    // Shared secret for HTTP state-changing calls (X-Token header). "token -" clears it.
+    if (argc < 2) { printf("token <value> | token -\n"); return 1; }
+    return (strcmp(argv[1], "-") ? settings_set_str("token", argv[1]) : settings_erase("token")) == ESP_OK ? 0 : 1;
+}
+
+static int cmd_reboot(int argc, char **argv)
+{
+    esp_restart();
+    return 0;
+}
+
 void console_start(void)
 {
     esp_console_repl_t *repl;
@@ -201,6 +226,9 @@ void console_start(void)
         {.command = "rec",  .help = "rec [ms] [tone_hz]: record all slots", .func = cmd_rec},
         {.command = "play", .help = "play [slot]: play one slot of the recording", .func = cmd_play},
         {.command = "dump", .help = "dump [frames]: hex dump of the recording", .func = cmd_dump},
+        {.command = "wifi", .help = "wifi: status; wifi <ssid> [pass]: save and join", .func = cmd_wifi},
+        {.command = "token", .help = "token <value>|-: set/clear the HTTP API token", .func = cmd_token},
+        {.command = "reboot", .help = "restart the device", .func = cmd_reboot},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));

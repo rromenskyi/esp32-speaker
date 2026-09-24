@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include "audio.h"
 #include "board.h"
+#include "buttons.h"
 #include "console.h"
 #include "es7210.h"
 #include "es8311.h"
@@ -14,7 +15,12 @@
 #include "esp_ota_ops.h"
 #include "esp_psram.h"
 #include "i2c_bus.h"
+#include "netconsole.h"
+#include "ota.h"
+#include "settings.h"
 #include "tca9555.h"
+#include "web.h"
+#include "wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -36,7 +42,11 @@ static void log_system(void)
 void app_main(void)
 {
     log_system();
-    esp_ota_mark_app_valid_cancel_rollback();
+    ESP_ERROR_CHECK(settings_init());
+    ESP_ERROR_CHECK(wifi_start());
+    ESP_ERROR_CHECK(web_start());
+    ESP_ERROR_CHECK(netconsole_start());
+    ota_watch_start();
 
     ESP_ERROR_CHECK(i2c_bus_init());
     ESP_LOGI(TAG, "I2C devices:");
@@ -60,6 +70,7 @@ void app_main(void)
         audio_tone(1320, 150, 6000);
     }
     es7210_init(BOARD_ADDR_ES7210);
+    buttons_start(NULL);
 
     console_start();
 }

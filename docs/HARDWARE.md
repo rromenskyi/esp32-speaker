@@ -36,7 +36,7 @@ ota_1    app  ota_1   0x700000 6M
 | I2S MCLK / BCLK / WS | 12 / 13 / 14 | ✅ |
 | I2S DOUT (to ES8311, speaker) | 16 | ✅ |
 | I2S DIN (from ES7210, mic array) | 15 | ✅ |
-| BOOT button | 0 | |
+| BOOT button (4th button on the case) | 0 | ✅ |
 | LED | 38 | |
 
 There is no display on this board.
@@ -55,8 +55,16 @@ There is no display on this board.
 | Pin | Function | |
 |-----|----------|---|
 | P10 (EXIO8) | speaker power amplifier enable, active high | ✅ |
+| P11 / P12 / P13 | buttons k1 / k2 / k3, active low | ✅ |
 
 At boot all inputs read high except P05.
+
+### Buttons and switches
+
+On the case, left to right: **k1, k2, k3, boot, reset**, plus a battery power
+slide switch. k1–k3 are on the TCA9555 (P11–P13), boot is GPIO0 (also the ROM
+download strap), reset is the chip's EN pin (not visible to firmware). All
+buttons are active low; `main/buttons.c` polls them every 20 ms with debouncing.
 
 ### Audio bus
 
