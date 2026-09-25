@@ -35,6 +35,7 @@ static volatile int s_enabled = 1;
 static volatile float s_last_prob;
 static volatile uint32_t s_last_us;
 static volatile bool s_test;
+static volatile bool s_reset;   // detector task resets its state before the next audio
 static volatile float s_test_peak;
 static volatile int s_test_hits;
 
@@ -120,6 +121,14 @@ static void detector_task(void *arg)
 
     for (;;) {
         size_t got = xStreamBufferReceive(s_audio, pcm, sizeof(pcm), portMAX_DELAY) / 2;
+        if (s_reset) {
+            // Fresh streaming state: model variables, frontend, window, warmup.
+            s_interp->Reset();
+            FrontendReset(&s_frontend);
+            frames = inferences = window_pos = 0;
+            memset(window, 0, sizeof(window));
+            s_reset = false;
+        }
         const int16_t *p = pcm;
         while (got > 0) {
             size_t read = 0;
@@ -191,9 +200,14 @@ extern "C" uint32_t wakeword_last_us(void) { return s_last_us; }
 
 extern "C" void wakeword_test_begin(void)
 {
+    // Each test clip starts from a clean state; otherwise the model's ~1.5 s
+    // of streaming memory carries the previous clip into this one.
+    s_test = true;                       // pause the mic feed first
     s_test_peak = 0;
     s_test_hits = 0;
-    s_test = true;
+    vTaskDelay(pdMS_TO_TICKS(40));       // let the detector drain what's queued
+    xStreamBufferReset(s_audio);
+    s_reset = true;
 }
 
 extern "C" void wakeword_test_end(float *peak, int *detections)
