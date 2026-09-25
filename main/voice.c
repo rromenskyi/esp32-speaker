@@ -27,7 +27,8 @@ static const char *TAG = "voice";
 
 #define FRAME_SAMPLES     320               // 20 ms at 16 kHz
 #define MAX_LISTEN_MS     15000             // hard cap on one utterance
-#define THINK_TIMEOUT_MS  20000             // no reply by then: back to idle
+#define THINK_TIMEOUT_MS  45000             // no "thinking" heartbeat for this long:
+                                            // the server is gone, back to idle
 #define MIC_SLOT          0                 // one of the two mics (slot 2 is the other)
 #define REF_SLOT          1                 // hardware loopback of the speaker output
 
@@ -215,7 +216,9 @@ static void handle_text(const char *data, int len)
     } else if (!strcmp(type, "listen") && st && !strcmp(st, "stop")) {
         if (s_state == ST_LISTENING) set_state(ST_THINKING);
     } else if (!strcmp(type, "thinking")) {
-        if (s_state != ST_SPEAKING) set_state(ST_THINKING);
+        // Also the server's heartbeat while it works: re-entering the state
+        // restarts the THINK_TIMEOUT_MS countdown.
+        if (s_state != ST_SPEAKING && s_state != ST_LISTENING) set_state(ST_THINKING);
     } else if (!strcmp(type, "set")) {
         cJSON *v = cJSON_GetObjectItem(j, "volume");
         if (cJSON_IsNumber(v)) set_volume(v->valueint, false);
@@ -267,6 +270,24 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+// Injected utterance (POST /ask): while set, the mic task streams these samples
+// instead of the microphone — a remote end-to-end test of the device path.
+static const int16_t *volatile s_inject;
+static volatile size_t s_inject_len, s_inject_pos;
+
+esp_err_t voice_ask_injected(const int16_t *pcm, size_t samples)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!s_linked || s_state == ST_LISTENING) { xSemaphoreGive(s_lock); return ESP_ERR_INVALID_STATE; }
+    s_inject_pos = 0;
+    s_inject_len = samples;
+    s_inject = pcm;
+    start_listening("button");
+    xSemaphoreGive(s_lock);
+    while (s_inject) vTaskDelay(pdMS_TO_TICKS(20));   // mic task clears it after the last frame
+    return ESP_OK;
+}
+
 // Raw capture tap for the console (mic/rec/loop): mic_task is the only reader
 // of the I2S RX channel, so it copies raw TDM frames here on request.
 static int16_t *volatile s_tap_buf;
@@ -312,6 +333,20 @@ static void mic_task(void *arg)
         bool speech = aec_process(mono, ref, mono, cancelled);
         if (s_auto) wakeword_feed(cancelled, FRAME_SAMPLES);
         state_t st = s_state;
+        if (s_inject && st == ST_LISTENING) {
+            size_t n = s_inject_len - s_inject_pos < FRAME_SAMPLES ? s_inject_len - s_inject_pos : FRAME_SAMPLES;
+            memset(mono, 0, sizeof(mono));
+            memcpy(mono, s_inject + s_inject_pos, n * sizeof(int16_t));
+            s_inject_pos += n;
+            if (s_inject_pos >= s_inject_len) {
+                esp_websocket_client_send_bin(s_ws, (const char *)mono, sizeof(mono), pdMS_TO_TICKS(100));
+                xSemaphoreTake(s_lock, portMAX_DELAY);
+                stop_listening("button");
+                xSemaphoreGive(s_lock);
+                s_inject = NULL;
+                continue;
+            }
+        }
         if (st == ST_LISTENING && s_linked)
             esp_websocket_client_send_bin(s_ws, (const char *)mono, sizeof(mono), pdMS_TO_TICKS(100));
         if (st == ST_LISTENING && s_wake_listen) {

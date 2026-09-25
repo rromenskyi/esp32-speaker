@@ -12,6 +12,7 @@
 #include "lwip/sockets.h"
 #include "ota.h"
 #include "settings.h"
+#include "voice.h"
 #include "wakeword.h"
 #include "wwmodel.h"
 #include "wifi.h"
@@ -175,6 +176,28 @@ static esp_err_t h_wwtest(httpd_req_t *req)
     return httpd_resp_sendstr(req, out);
 }
 
+// POST /ask: raw 16 kHz mono pcm16 sent to the voice server as an utterance
+// (as if spoken into the mic); the reply plays on the speaker as usual.
+static esp_err_t h_ask(httpd_req_t *req)
+{
+    if (!authorized(req)) return ESP_OK;
+    int len = req->content_len;
+    if (len <= 0 || len > 16000 * 2 * 15) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "1..15 s of pcm16");
+    int16_t *pcm = heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    if (!pcm) return httpd_resp_send_500(req);
+    int got = 0;
+    while (got < len) {
+        int n = httpd_req_recv(req, (char *)pcm + got, len - got);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0) break;
+        got += n;
+    }
+    esp_err_t err = got == len ? voice_ask_injected(pcm, len / 2) : ESP_FAIL;
+    free(pcm);
+    return err == ESP_OK ? httpd_resp_sendstr(req, "sent; the reply plays on the speaker\n")
+                         : httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+}
+
 static float query_float(httpd_req_t *req, const char *key, float def)
 {
     char q[160], v[24];
@@ -279,6 +302,7 @@ esp_err_t web_start(void)
         {.uri = "/ota", .method = HTTP_POST, .handler = h_ota},
         {.uri = "/reboot", .method = HTTP_POST, .handler = h_reboot},
         {.uri = "/wwtest", .method = HTTP_POST, .handler = h_wwtest},
+        {.uri = "/ask", .method = HTTP_POST, .handler = h_ask},
         {.uri = "/wwmodel", .method = HTTP_POST, .handler = h_wwmodel},
         {.uri = "/wwmodel", .method = HTTP_DELETE, .handler = h_wwmodel_delete},
     };

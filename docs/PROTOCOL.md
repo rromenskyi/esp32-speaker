@@ -77,7 +77,9 @@ pressure when its buffer is full.
 {"type": "listen", "state": "stop"}
 
 // The server is working on a reply (the device shows a "thinking" pattern
-// until speak start or an error).
+// until speak start or an error). Servers should repeat it every few seconds
+// (Bosun: 5 s) while working: the device gives up after 45 s without one, so
+// a slow agent is fine as long as the server is alive.
 {"type": "thinking"}
 
 // Device settings.

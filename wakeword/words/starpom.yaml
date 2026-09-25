@@ -1,18 +1,80 @@
-# Wake word definition: what to synthesize and what to use as hard negatives.
 name: starpom
 language: ru
-# ASR check (Whisper, --language below) that keeps a generated clip as a positive.
 asr_language: ru
-asr_match: "стар\\s*-?\\s*пом"
-# Phoneme strings for the multi-speaker English Piper model (LibriTTS, 904
-# speakers). Scored with Whisper; these two gave the most recognizable output.
-phoneme_variants: ["stɑːɹpˈɑːm"]
-text_variants: ["starpom"]
-# Phrases for the native-language Piper voices and macOS `say`.
-positive_phrases: ["Старпом", "Старпом!", "Старпом?", "Старпом.", "Эй, старпом", "Старпом,", "Слушай, старпом"]
-negative_phrases: ["старт", "паром", "стартап", "штамп", "стоп", "старый дом", "спортом", "старпер", "с тобой",
-  "стар", "помидор", "парад", "спам", "стамбул", "тромбон", "старший", "старпёр", "стартовал", "тарарам",
-  "станем", "стоп кран", "скоро дом", "с паромом", "сапоги", "стартовый", "вон там", "стартёр", "старосты",
-  "сторож", "стакан", "старому", "Остап", "стоматолог", "потом", "фантом"]
-native_voices: ["ru_RU-denis-medium", "ru_RU-dmitri-medium", "ru_RU-irina-medium", "ru_RU-ruslan-medium"]
+asr_match: стар\s*-?\s*пом
+phoneme_variants:
+- stɑːɹpˈɑːm
+text_variants:
+- starpom
+positive_phrases:
+- Старпом
+- Старпом!
+- Старпом?
+- Старпом.
+- Эй, старпом
+- Старпом,
+- Слушай, старпом
+negative_phrases:
+- старт
+- паром
+- стартап
+- штамп
+- стоп
+- старый дом
+- спортом
+- старпер
+- с тобой
+- стар
+- помидор
+- парад
+- спам
+- стамбул
+- тромбон
+- старший
+- старпёр
+- стартовал
+- тарарам
+- станем
+- стоп кран
+- скоро дом
+- с паромом
+- сапоги
+- стартовый
+- вон там
+- стартёр
+- старосты
+- сторож
+- стакан
+- старому
+- Остап
+- стоматолог
+- потом
+- фантом
+- стартуем
+- стартовать
+- стартанули
+- мы стартуем
+- старшина
+- штурман
+- старая помпа
+- стар пом
+- старпомовский
+- стартовая площадка
+- старт через минуту
+- стоп машина
+- сторонам
+- стартуем через пять минут
+- старая бомба
+- старт стоп
+- Сара, пойдём
+- стар и мал
+- старь
+- старец
+- скорпион
+- стартовали
+native_voices:
+- ru_RU-denis-medium
+- ru_RU-dmitri-medium
+- ru_RU-irina-medium
+- ru_RU-ruslan-medium
 say_voice: Milena
