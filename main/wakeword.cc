@@ -175,7 +175,14 @@ extern "C" esp_err_t wakeword_start(const wakeword_config_t *cfg, wakeword_cb_t 
 
 extern "C" void wakeword_feed(const int16_t *pcm, size_t samples)
 {
-    if (s_audio) xStreamBufferSend(s_audio, pcm, samples * 2, 0);
+    // The mic path pauses while a test clip is being fed: two interleaved
+    // streams in one buffer would be garbage to the frontend.
+    if (s_audio && !s_test) xStreamBufferSend(s_audio, pcm, samples * 2, 0);
+}
+
+extern "C" void wakeword_feed_test(const int16_t *pcm, size_t samples)
+{
+    if (s_audio) xStreamBufferSend(s_audio, pcm, samples * 2, pdMS_TO_TICKS(100));
 }
 
 extern "C" void wakeword_set_enabled(int on) { s_enabled = on; }

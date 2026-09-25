@@ -20,6 +20,7 @@ model.
 `okay_nabu` is a known-good public model used to validate the detector path
 until the project's own wake word model is trained (see `wakeword/`).
 
-Test a model on the device without the microphone:
+Test a model on the device without the microphone (the live mic feed pauses
+during the test, so it works in auto mode too):
 `curl --data-binary @clip.pcm http://<speaker>/wwtest` (16 kHz mono s16le);
 it returns the peak probability and the number of detections.

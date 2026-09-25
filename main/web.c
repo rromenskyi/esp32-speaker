@@ -162,7 +162,7 @@ static esp_err_t h_wwtest(httpd_req_t *req)
         int n = httpd_req_recv(req, (char *)buf, left < (int)sizeof(buf) ? left : (int)sizeof(buf));
         if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
         if (n <= 0) break;
-        wakeword_feed(buf, n / 2);
+        wakeword_feed_test(buf, n / 2);
         left -= n;
         vTaskDelay(pdMS_TO_TICKS(n / 32));   // n bytes = n/32 ms of audio
     }

@@ -27,7 +27,8 @@ float wakeword_last_probability(void);   // latest window mean, for tuning
 uint32_t wakeword_last_us(void);         // last inference time
 // Test mode: detections are counted and the peak probability tracked, but the
 // callback isn't called (for feeding recorded clips).
-void wakeword_test_begin(void);
+void wakeword_test_begin(void);           // pauses the mic feed
+void wakeword_feed_test(const int16_t *pcm, size_t samples);
 void wakeword_test_end(float *peak, int *detections);
 
 #ifdef __cplusplus
