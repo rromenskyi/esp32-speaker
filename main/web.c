@@ -13,6 +13,7 @@
 #include "ota.h"
 #include "settings.h"
 #include "wakeword.h"
+#include "wwmodel.h"
 #include "wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -174,6 +175,51 @@ static esp_err_t h_wwtest(httpd_req_t *req)
     return httpd_resp_sendstr(req, out);
 }
 
+static float query_float(httpd_req_t *req, const char *key, float def)
+{
+    char q[160], v[24];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK || httpd_query_key_value(q, key, v, sizeof(v)) != ESP_OK)
+        return def;
+    return strtof(v, NULL);
+}
+
+// POST /wwmodel?cutoff=0.9&window=5&arena=40000&name=x with the .tflite as the
+// body: stores the wake word model in flash and reboots. DELETE reverts to the
+// built-in model.
+static esp_err_t h_wwmodel(httpd_req_t *req)
+{
+    if (!authorized(req)) return ESP_OK;
+    char q[160], name[32] = "uploaded";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) httpd_query_key_value(q, "name", name, sizeof(name));
+    wwmodel_writer_t *w;
+    esp_err_t err = wwmodel_write_begin(&w, req->content_len, query_float(req, "cutoff", 0.9f),
+                                        (int)query_float(req, "window", 5), (int)query_float(req, "arena", 40000), name);
+    if (err != ESP_OK) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, esp_err_to_name(err));
+    char *buf = malloc(4096);
+    int left = req->content_len;
+    while (buf && left > 0) {
+        int n = httpd_req_recv(req, buf, left < 4096 ? left : 4096);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0 || (err = wwmodel_write(w, buf, n)) != ESP_OK) break;
+        left -= n;
+    }
+    free(buf);
+    if (left > 0 || err != ESP_OK || (err = wwmodel_write_finish(w)) != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "model upload failed");
+    httpd_resp_sendstr(req, "OK, rebooting\n");
+    xTaskCreate(reboot_later, "reboot", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
+
+static esp_err_t h_wwmodel_delete(httpd_req_t *req)
+{
+    if (!authorized(req)) return ESP_OK;
+    wwmodel_erase();
+    httpd_resp_sendstr(req, "OK, rebooting\n");
+    xTaskCreate(reboot_later, "reboot", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
+
 static esp_err_t h_reboot(httpd_req_t *req)
 {
     if (!authorized(req)) return ESP_OK;
@@ -221,6 +267,7 @@ esp_err_t web_start(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
     cfg.lru_purge_enable = true;
+    cfg.max_uri_handlers = 16;   // default is 8; registering past it fails silently
     httpd_handle_t srv;
     esp_err_t err = httpd_start(&srv, &cfg);
     if (err != ESP_OK) return err;
@@ -232,6 +279,8 @@ esp_err_t web_start(void)
         {.uri = "/ota", .method = HTTP_POST, .handler = h_ota},
         {.uri = "/reboot", .method = HTTP_POST, .handler = h_reboot},
         {.uri = "/wwtest", .method = HTTP_POST, .handler = h_wwtest},
+        {.uri = "/wwmodel", .method = HTTP_POST, .handler = h_wwmodel},
+        {.uri = "/wwmodel", .method = HTTP_DELETE, .handler = h_wwmodel_delete},
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) httpd_register_uri_handler(srv, &uris[i]);
     httpd_register_err_handler(srv, HTTPD_404_NOT_FOUND, h_404);

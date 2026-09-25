@@ -2,8 +2,16 @@
 
 microWakeWord streaming models (TFLite, int8 input `[1, 3, 40]`) plus their
 JSON metadata (`probability_cutoff`, `sliding_window_size`,
-`tensor_arena_size`). The firmware currently embeds one model at build time
-(`main/CMakeLists.txt`, `EMBED_FILES`; parameters in `voice_start`).
+`tensor_arena_size`). The firmware embeds `okay_nabu` as a fallback; any other model is uploaded to
+the `model` flash partition and survives app OTA updates:
+
+```sh
+curl --data-binary @model.tflite "http://<speaker>/wwmodel?cutoff=0.9&window=5&arena=45000&name=mymodel"
+curl -X DELETE http://<speaker>/wwmodel      # back to the built-in model
+```
+
+The speaker reboots after either; `server` on the console shows the active
+model.
 
 | Model | Source | License |
 |-------|--------|---------|

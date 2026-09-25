@@ -6,6 +6,7 @@
 #include <string.h>
 #include "aec.h"
 #include "wakeword.h"
+#include "wwmodel.h"
 #include "audio.h"
 #include "board.h"
 #include "cJSON.h"
@@ -44,6 +45,7 @@ static char s_url[160];
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
 static volatile bool s_auto;   // wake-word mode (toggled by the boot button)
+static char s_ww_name[40];
 static volatile bool s_wake_listen;   // current utterance was started by the wake word
 static int s_speech_ms, s_silence_ms; // VAD bookkeeping for wake-word utterances
 
@@ -366,7 +368,8 @@ esp_err_t voice_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(aec_init());
-    // Wake word model (embedded for now; see models/).
+    // Wake word model: an uploaded one in the `model` partition (POST
+    // /wwmodel), else the built-in okay_nabu (see models/).
     extern const uint8_t ww_model_start[] asm("_binary_okay_nabu_tflite_start");
     extern const uint8_t ww_model_end[] asm("_binary_okay_nabu_tflite_end");
     wakeword_config_t ww = {
@@ -376,6 +379,7 @@ esp_err_t voice_start(void)
         .sliding_window = 5,
         .arena_size = 26080 + 8192,
     };
+    if (!wwmodel_load(&ww, s_ww_name, sizeof(s_ww_name))) strlcpy(s_ww_name, "okay_nabu (built-in)", sizeof(s_ww_name));
     if (wakeword_start(&ww, on_wake) != ESP_OK) ESP_LOGE(TAG, "wake word detector failed to start");
     char vol[8];
     if (settings_get_str("volume", vol, sizeof(vol)) == ESP_OK) s_volume = atoi(vol);
@@ -407,8 +411,8 @@ esp_err_t voice_set_server(const char *url, const char *token)
 
 void voice_describe(char *out, size_t len)
 {
-    snprintf(out, len, "server=%s link=%s state=%s auto=%s", s_url[0] ? s_url : "(none)",
-             s_linked ? "up" : "down", ST_NAME[s_state], s_auto ? "on" : "off");
+    snprintf(out, len, "server=%s link=%s state=%s auto=%s wakeword=%s", s_url[0] ? s_url : "(none)",
+             s_linked ? "up" : "down", ST_NAME[s_state], s_auto ? "on" : "off", s_ww_name);
 }
 
 void voice_aec_test(int ms, int amplitude)
