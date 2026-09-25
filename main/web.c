@@ -12,6 +12,7 @@
 #include "lwip/sockets.h"
 #include "ota.h"
 #include "settings.h"
+#include "wakeword.h"
 #include "wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -148,6 +149,31 @@ static esp_err_t h_ota(httpd_req_t *req)
     return ESP_OK;
 }
 
+// POST /wwtest: raw 16 kHz mono pcm16 fed straight to the wake word detector
+// (bypassing the mic), paced at real time. Returns the peak probability.
+static esp_err_t h_wwtest(httpd_req_t *req)
+{
+    int16_t buf[320];
+    int left = req->content_len;
+    wakeword_test_begin();
+    while (left > 0) {
+        int n = httpd_req_recv(req, (char *)buf, left < (int)sizeof(buf) ? left : (int)sizeof(buf));
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0) break;
+        wakeword_feed(buf, n / 2);
+        left -= n;
+        vTaskDelay(pdMS_TO_TICKS(n / 32));   // n bytes = n/32 ms of audio
+    }
+    float peak;
+    int hits;
+    wakeword_test_end(&peak, &hits);
+    char out[96];
+    snprintf(out, sizeof(out), "{\"peak\":%.3f,\"detections\":%d,\"infer_us\":%lu}", peak, hits,
+             (unsigned long)wakeword_last_us());
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, out);
+}
+
 static esp_err_t h_reboot(httpd_req_t *req)
 {
     if (!authorized(req)) return ESP_OK;
@@ -205,6 +231,7 @@ esp_err_t web_start(void)
         {.uri = "/wifi", .method = HTTP_POST, .handler = h_wifi},
         {.uri = "/ota", .method = HTTP_POST, .handler = h_ota},
         {.uri = "/reboot", .method = HTTP_POST, .handler = h_reboot},
+        {.uri = "/wwtest", .method = HTTP_POST, .handler = h_wwtest},
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) httpd_register_uri_handler(srv, &uris[i]);
     httpd_register_err_handler(srv, HTTPD_404_NOT_FOUND, h_404);

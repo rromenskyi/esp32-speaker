@@ -10,6 +10,7 @@ esp_err_t voice_start(void);
 // Change the server (saved to settings) and reconnect. url NULL/"" disables.
 esp_err_t voice_set_server(const char *url, const char *token);
 void voice_on_button(button_t b, bool pressed);
+void voice_set_auto(bool on);   // wake word mode
 void voice_describe(char *out, size_t len);
 // Capture raw TDM frames (AUDIO_MIC_SLOTS int16 each) from the mic task.
 esp_err_t voice_capture_raw(int16_t *tdm, size_t frames);

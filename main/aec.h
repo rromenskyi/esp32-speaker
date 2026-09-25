@@ -9,8 +9,10 @@
 
 esp_err_t aec_init(void);
 // mic: raw microphone, ref: what the speaker is playing (hardware loopback,
-// sample-aligned with mic), out: cleaned speech. out may alias mic.
-void aec_process(const int16_t *mic, const int16_t *ref, int16_t *out);
+// sample-aligned with mic), out: cleaned speech (may alias mic). cancelled
+// (optional) gets the echo-cancelled signal before noise suppression/AGC.
+// Returns the preprocessor's voice activity decision for this frame.
+bool aec_process(const int16_t *mic, const int16_t *ref, int16_t *out, int16_t *cancelled);
 void aec_reset(void);
 void aec_set_enabled(bool on);   // off = raw mic passes through
 bool aec_enabled(void);

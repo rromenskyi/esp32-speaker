@@ -9,6 +9,30 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.7.19~2
+  espressif/esp-nn:
+    component_hash: 3b3411b0e4ad1717a72870fde9f9b67cef6f3f97491cc64fcfc1910a8fd8a246
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.4.1
+  espressif/esp-tflite-micro:
+    component_hash: bdb2625ed976d5b861177cdc295abc6738724f84f4c7c60fc58c721d2b30bed6
+    dependencies:
+    - name: espressif/esp-nn
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.3.0'
+    - name: idf
+      require: private
+      version: '>=5.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.4.1
   espressif/esp_websocket_client:
     component_hash: dc00233af846f3a744ada283a300e0d586040aadc3ee67361645ecdce4523672
     dependencies:
@@ -35,8 +59,9 @@ dependencies:
     version: 6.0.0
 direct_dependencies:
 - espressif/cjson
+- espressif/esp-tflite-micro
 - espressif/esp_websocket_client
 - espressif/mdns
-manifest_hash: 792d8c825a46e50f4775300f7efcf07befaa85c872350d6fa4d9451d5f16b48a
+manifest_hash: c3f6898baf48f210286acc42313bbdd90d7f6079232edde03ea4412332431525
 target: esp32s3
 version: 3.0.0

@@ -2,3 +2,4 @@ dependencies:
   espressif/mdns: "^1.4"
   espressif/esp_websocket_client: "^1.4"
   espressif/cjson: "*"
+  espressif/esp-tflite-micro: "^1.4"

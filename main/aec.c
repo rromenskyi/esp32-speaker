@@ -40,6 +40,7 @@ esp_err_t aec_init(void)
     // Residual echo suppression needs the canceller's state.
     speex_preprocess_ctl(s_pre, SPEEX_PREPROCESS_SET_ECHO_STATE, s_echo);
     speex_preprocess_ctl(s_pre, SPEEX_PREPROCESS_SET_DENOISE, &on);
+    speex_preprocess_ctl(s_pre, SPEEX_PREPROCESS_SET_VAD, &on);   // end of utterance after a wake word
     speex_preprocess_ctl(s_pre, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noise_db);
     speex_preprocess_ctl(s_pre, SPEEX_PREPROCESS_SET_ECHO_SUPPRESS, &echo_db);
     speex_preprocess_ctl(s_pre, SPEEX_PREPROCESS_SET_ECHO_SUPPRESS_ACTIVE, &echo_active_db);
@@ -54,11 +55,12 @@ esp_err_t aec_init(void)
     return ESP_OK;
 }
 
-void aec_process(const int16_t *mic, const int16_t *ref, int16_t *out)
+bool aec_process(const int16_t *mic, const int16_t *ref, int16_t *out, int16_t *cancelled)
 {
     if (!s_on) {
+        if (cancelled) memcpy(cancelled, mic, AEC_FRAME * sizeof(int16_t));
         if (out != mic) memcpy(out, mic, AEC_FRAME * sizeof(int16_t));
-        return;
+        return false;
     }
     int64_t t0 = esp_timer_get_time();
     int16_t tmp[AEC_FRAME];
@@ -66,13 +68,15 @@ void aec_process(const int16_t *mic, const int16_t *ref, int16_t *out)
     speex_echo_cancellation(s_echo, mic, ref, tmp);
     uint32_t t_echo = (uint32_t)(esp_timer_get_time() - t0);
     double c = msq(tmp);
-    speex_preprocess_run(s_pre, tmp);
+    if (cancelled) memcpy(cancelled, tmp, sizeof(tmp));
+    bool speech = speex_preprocess_run(s_pre, tmp) != 0;
     memcpy(out, tmp, sizeof(tmp));
     s_last_us = (uint32_t)(esp_timer_get_time() - t0);
     s_st.mic += m; s_st.ref += r; s_st.cancelled += c; s_st.out += msq(tmp);
     s_st.frames++;
     s_st.echo_us += t_echo;
     if (s_last_us > s_st.max_us) s_st.max_us = s_last_us;
+    return speech;
 }
 
 void aec_reset(void)

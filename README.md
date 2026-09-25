@@ -8,7 +8,9 @@ front-end for your own LLM agents: microphone array in, speech out, over Wi-Fi.
 > server over WebSocket and plays the server's audio back
 > ([protocol](docs/PROTOCOL.md), [reference echo server](server/echo_server.py)).
 > The mic path runs speexdsp echo cancellation (hardware loopback reference),
-> noise suppression and AGC. A wake word and Opus are next.
+> noise suppression and AGC, and an on-device wake word detector (TFLite Micro,
+> microWakeWord models) in auto mode. Training the project's own wake word
+> model is in progress.
 
 ## Hardware
 

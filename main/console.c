@@ -261,6 +261,13 @@ static int cmd_aec(int argc, char **argv)
     return 0;
 }
 
+static int cmd_auto(int argc, char **argv)
+{
+    if (argc < 2) { printf("auto on|off\n"); return 1; }
+    voice_set_auto(!strcmp(argv[1], "on"));
+    return 0;
+}
+
 static int cmd_px(int argc, char **argv)
 {
     // px <index> <r> <g> <b>: light one pixel, everything else off.
@@ -298,6 +305,7 @@ void console_start(void)
         {.command = "status", .help = "status <state> [s]: preview an LED status pattern", .func = cmd_status},
         {.command = "server", .help = "server [<ws-url> [token] | -]: voice server", .func = cmd_server},
         {.command = "aec",  .help = "aec on|off | aec test [ms] [amp]: echo canceller", .func = cmd_aec},
+        {.command = "auto", .help = "auto on|off: wake word mode", .func = cmd_auto},
         {.command = "px",   .help = "px <index> <r> <g> <b>: light one pixel only", .func = cmd_px},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)

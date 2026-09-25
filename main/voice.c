@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "aec.h"
+#include "wakeword.h"
 #include "audio.h"
 #include "board.h"
 #include "cJSON.h"
@@ -43,6 +44,11 @@ static char s_url[160];
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
 static volatile bool s_auto;   // wake-word mode (toggled by the boot button)
+static volatile bool s_wake_listen;   // current utterance was started by the wake word
+static int s_speech_ms, s_silence_ms; // VAD bookkeeping for wake-word utterances
+
+#define WAKE_END_SILENCE_MS 700   // stop after this much silence following speech
+#define WAKE_NO_SPEECH_MS   4000  // give up if no speech follows the wake word
 
 static void set_state(state_t st)
 {
@@ -70,6 +76,8 @@ static void send_listen(const char *state, const char *reason)
 static void start_listening(const char *reason)
 {
     if (!s_linked) { status_set_voice(STATUS_ERROR); return; }
+    s_wake_listen = !strcmp(reason, "wake");
+    s_speech_ms = s_silence_ms = 0;
     if (s_state == ST_SPEAKING) {
         audio_play_flush();
         send_json("{\"type\":\"abort\",\"reason\":\"barge_in\"}");
@@ -124,6 +132,26 @@ static void set_volume(int v, bool beep)
     settings_set_str("volume", buf);
     ESP_LOGI(TAG, "volume %d", s_volume);
     if (beep && s_state != ST_SPEAKING) audio_tone(880, 60, 8000);
+}
+
+static void on_wake(float probability)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_auto && s_linked && s_state != ST_LISTENING) {
+        ESP_LOGI(TAG, "wake word (p=%.2f) while %s", probability, ST_NAME[s_state]);
+        start_listening("wake");   // barges in if speaking
+        audio_tone(1200, 40, 5000);
+    }
+    xSemaphoreGive(s_lock);
+}
+
+void voice_set_auto(bool on)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_auto = on;
+    settings_set_str("auto", on ? "1" : "0");
+    set_state(s_state);
+    xSemaphoreGive(s_lock);
 }
 
 void voice_on_button(button_t b, bool pressed)
@@ -269,7 +297,7 @@ static void tap_feed(const int16_t *tdm, size_t frames)
 static void mic_task(void *arg)
 {
     static int16_t tdm[FRAME_SAMPLES * AUDIO_MIC_SLOTS];
-    static int16_t mono[FRAME_SAMPLES], ref[FRAME_SAMPLES];
+    static int16_t mono[FRAME_SAMPLES], ref[FRAME_SAMPLES], cancelled[FRAME_SAMPLES];
     for (;;) {
         audio_read(tdm, FRAME_SAMPLES);
         tap_feed(tdm, FRAME_SAMPLES);
@@ -279,15 +307,25 @@ static void mic_task(void *arg)
         }
         // Every frame, not only while listening: the canceller keeps adapting
         // while the speaker talks, so it has converged when the user barges in.
-        aec_process(mono, ref, mono);
+        bool speech = aec_process(mono, ref, mono, cancelled);
+        if (s_auto) wakeword_feed(cancelled, FRAME_SAMPLES);
         state_t st = s_state;
         if (st == ST_LISTENING && s_linked)
             esp_websocket_client_send_bin(s_ws, (const char *)mono, sizeof(mono), pdMS_TO_TICKS(100));
+        if (st == ST_LISTENING && s_wake_listen) {
+            // No button to release after a wake word: end on silence.
+            if (speech) { s_speech_ms += 20; s_silence_ms = 0; }
+            else s_silence_ms += 20;
+        }
         xSemaphoreTake(s_lock, portMAX_DELAY);
         // Read the state age under the lock: a button can change state between
         // frames, and a stale age once aborted fresh utterances as "timeout".
         int64_t in_state = now_ms() - s_state_since_ms;
         if (s_state == ST_LISTENING && in_state > MAX_LISTEN_MS) stop_listening("timeout");
+        else if (s_state == ST_LISTENING && s_wake_listen && s_speech_ms > 200 && s_silence_ms >= WAKE_END_SILENCE_MS)
+            stop_listening("silence");
+        else if (s_state == ST_LISTENING && s_wake_listen && s_speech_ms <= 200 && in_state > WAKE_NO_SPEECH_MS)
+            stop_listening("silence");
         else if (s_state == ST_THINKING && in_state > THINK_TIMEOUT_MS) set_state(ST_IDLE);
         else if (s_state == ST_SPEAKING && s_speak_stopped && audio_play_idle()) {
             send_json("{\"type\":\"speak\",\"state\":\"done\"}");
@@ -328,6 +366,17 @@ esp_err_t voice_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(aec_init());
+    // Wake word model (embedded for now; see models/).
+    extern const uint8_t ww_model_start[] asm("_binary_okay_nabu_tflite_start");
+    extern const uint8_t ww_model_end[] asm("_binary_okay_nabu_tflite_end");
+    wakeword_config_t ww = {
+        .model = ww_model_start,
+        .model_len = (size_t)(ww_model_end - ww_model_start),
+        .probability_cutoff = 0.97f,
+        .sliding_window = 5,
+        .arena_size = 26080 + 8192,
+    };
+    if (wakeword_start(&ww, on_wake) != ESP_OK) ESP_LOGE(TAG, "wake word detector failed to start");
     char vol[8];
     if (settings_get_str("volume", vol, sizeof(vol)) == ESP_OK) s_volume = atoi(vol);
     if (settings_get_str("auto", vol, sizeof(vol)) == ESP_OK) s_auto = vol[0] == '1';
