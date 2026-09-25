@@ -14,6 +14,7 @@
 static volatile status_t s_preview = STATUS_AUTO;
 static volatile status_t s_voice = STATUS_OFF;
 static volatile int s_hold = -1;              // boot-hold progress, -1 = none
+static volatile int64_t s_error_until;         // ms; red error flash until then
 static volatile int64_t s_preview_until;
 
 static void fill(uint8_t r, uint8_t g, uint8_t b) { leds_fill(BOARD_LED_COUNT, r, g, b); }
@@ -31,7 +32,7 @@ static void status_task(void *arg)
         if (autos == STATUS_CONNECTED && prev_auto != STATUS_CONNECTED) connected_at = now;
         prev_auto = autos;
         if (autos == STATUS_CONNECTED && now - connected_at > CONNECTED_SHOW_MS) autos = STATUS_OFF;
-        if (autos == STATUS_OFF) autos = s_voice;
+        if (autos == STATUS_OFF) autos = now < s_error_until ? STATUS_ERROR : s_voice;
 
         shown = s_hold >= 0 ? STATUS_HOLD : autos;
         if (s_preview != STATUS_AUTO) {
@@ -110,6 +111,7 @@ esp_err_t status_start(void)
 
 void status_set_voice(status_t s) { s_voice = s; }
 void status_set_hold(int progress) { s_hold = progress; }
+void status_flash_error(int ms) { s_error_until = esp_timer_get_time() / 1000 + ms; }
 
 void status_preview(status_t s, int seconds)
 {

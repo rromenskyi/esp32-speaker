@@ -78,13 +78,14 @@ static void send_listen(const char *state, const char *reason)
 
 static void start_listening(const char *reason)
 {
-    if (!s_linked) { status_set_voice(STATUS_ERROR); return; }
+    if (!s_linked) { status_flash_error(1500); return; }
     s_wake_listen = !strcmp(reason, "wake");
     s_speech_ms = s_silence_ms = 0;
     if (s_state == ST_SPEAKING) {
         audio_play_flush();
         send_json("{\"type\":\"abort\",\"reason\":\"barge_in\"}");
     }
+    ESP_LOGI(TAG, "listen start (%s)", reason);
     send_listen("start", reason);
     set_state(ST_LISTENING);
 }
@@ -92,6 +93,7 @@ static void start_listening(const char *reason)
 static void stop_listening(const char *reason)
 {
     if (s_state != ST_LISTENING) return;
+    ESP_LOGI(TAG, "listen stop (%s) after %lld ms, speech %d ms", reason, (long long)(now_ms() - s_state_since_ms), s_speech_ms);
     send_listen("stop", reason);
     set_state(ST_THINKING);
 }
@@ -119,6 +121,18 @@ static void boot_hold_task(void *arg)
     status_set_hold(-1);
     ESP_LOGI(TAG, "k1 released before %d s, no reset", BOOT_HOLD_MS / 1000);
     vTaskDelete(NULL);
+}
+
+#define PTT_HOLD_MS     250
+
+static esp_timer_handle_t s_ptt_timer;
+static volatile bool s_k1_down;
+
+static void ptt_timer_cb(void *arg)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_k1_down) start_listening("button");
+    xSemaphoreGive(s_lock);
 }
 
 #define VOLUME_STEP     10
@@ -169,8 +183,28 @@ void voice_on_button(button_t b, bool pressed)
             s_boot_hold = false;
         }
     } else if (b == BUTTON_K1) {
-        if (pressed) start_listening("button");
-        else stop_listening("button");
+        // Push-to-talk starts only once k1 has been held for PTT_HOLD_MS: a
+        // mis-tap must not cancel the request the server is working on. A tap
+        // while the speaker talks stops the playback.
+        if (pressed) {
+            s_k1_down = true;
+            esp_timer_start_once(s_ptt_timer, PTT_HOLD_MS * 1000LL);
+        } else {
+            s_k1_down = false;
+            if (esp_timer_is_active(s_ptt_timer)) {
+                esp_timer_stop(s_ptt_timer);
+                if (s_state == ST_SPEAKING) {
+                    ESP_LOGI(TAG, "k1 tap: stop speaking");
+                    audio_play_flush();
+                    send_json("{\"type\":\"abort\",\"reason\":\"button\"}");
+                    set_state(ST_IDLE);
+                } else {
+                    ESP_LOGI(TAG, "k1 tap ignored (%s)", ST_NAME[s_state]);
+                }
+            } else {
+                stop_listening("button");
+            }
+        }
     } else if (b == BUTTON_BOOT) {
         // Short press toggles auto (wake word) mode; persisted.
         if (pressed) {
@@ -226,7 +260,7 @@ static void handle_text(const char *data, int len)
         ESP_LOGW(TAG, "server error: %s", cJSON_GetStringValue(cJSON_GetObjectItem(j, "message")) ?: "?");
         audio_play_flush();
         set_state(ST_IDLE);
-        status_set_voice(STATUS_ERROR);
+        status_flash_error(1500);   // brief: the error must not stick
     }
     xSemaphoreGive(s_lock);
     cJSON_Delete(j);
@@ -402,6 +436,8 @@ static void link_start(void)
 esp_err_t voice_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+    esp_timer_create_args_t ptt = {.callback = ptt_timer_cb, .name = "ptt"};
+    ESP_ERROR_CHECK(esp_timer_create(&ptt, &s_ptt_timer));
     ESP_ERROR_CHECK(aec_init());
     // Wake word model: an uploaded one in the `model` partition (POST
     // /wwmodel), else the built-in okay_nabu (see models/).

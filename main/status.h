@@ -23,4 +23,5 @@ esp_err_t status_start(void);
 // Voice-layer state; STATUS_OFF = idle. Network states take precedence.
 void status_set_voice(status_t s);
 void status_set_hold(int progress_percent);   // 0..100; <0 ends the hold display
+void status_flash_error(int ms);              // red for `ms`, then back to normal
 void status_preview(status_t s, int seconds);
