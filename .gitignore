@@ -12,3 +12,10 @@ dependencies.lock.tmp
 # Echo server recordings
 recordings/
 __pycache__/
+
+# Wake word training workspace (data, envs, tools, outputs)
+wakeword/*/
+!wakeword/words/
+wakeword/*.tsv
+wakeword/*.log
+wakeword/training_parameters.yaml
