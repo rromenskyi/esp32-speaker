@@ -4,7 +4,7 @@
 Connects like the firmware does, sends one utterance (a WAV file, or text spoken
 by macOS `say`), and saves the server's spoken reply as a WAV.
 
-    python fake_device.py ws://host:8080/api/device --say "Который час?" --out reply.wav
+    python fake_device.py ws://host:8080/api/device --say "What time is it?" --voice Samantha --out reply.wav
     python fake_device.py ws://host:8790/ --wav question.wav [--token SECRET]
 
 Input audio is converted to 16 kHz mono pcm16 with ffmpeg and streamed in real
@@ -83,7 +83,7 @@ def main():
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--say", help="text to speak with macOS `say`")
     src.add_argument("--wav", help="audio file to send (any format ffmpeg reads)")
-    ap.add_argument("--voice", default="Milena", help="`say` voice (default Milena, ru_RU)")
+    ap.add_argument("--voice", help="`say` voice, e.g. Samantha (en_US) or any installed voice (`say -v '?'`)")
     ap.add_argument("--device", default="fake-speaker")
     ap.add_argument("--token")
     ap.add_argument("--out", default="reply.wav")

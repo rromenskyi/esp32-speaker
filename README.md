@@ -67,12 +67,12 @@ python server/echo_server.py --port 8790          # plays every utterance back
 
 `server/fake_device.py` plays the device's part without hardware — it sends one
 utterance (a WAV file, or text spoken by macOS `say`) and saves the reply:
-`python server/fake_device.py ws://<server>/api/device --say "Который час?"`.
+`python server/fake_device.py ws://<server>/api/device --say "What time is it?" --voice Samantha`.
 
 On the device console: `server ws://<server-ip>:8790/`. Hold **k1**, speak,
 release: the utterance goes to the server and its reply is played. **k2 / k3**
-are volume − / +. **boot** (short press) toggles auto mode, where the wake word
-"Старпом" will start listening (in progress). Holding **k1** from power-on for
+are volume − / +. **boot** (short press) toggles auto mode, where a wake word starts
+listening (in progress; the wake word is a trained model, not built in). Holding **k1** from power-on for
 15 s reopens the Wi-Fi setup portal. LEDs: blue = listening, purple = thinking, green = speaking, faint green
 double blink every 8 s = idle heartbeat, faint cyan pulse = auto mode, short
 red pulse every 5 s = server unreachable.
