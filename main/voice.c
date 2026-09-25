@@ -42,12 +42,16 @@ static char s_url[160];
 
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
+static volatile bool s_auto;   // wake-word mode (toggled by the boot button)
+
 static void set_state(state_t st)
 {
     s_state = st;
     s_state_since_ms = now_ms();
     static const status_t led[] = {STATUS_OFF, STATUS_LISTENING, STATUS_THINKING, STATUS_SPEAKING};
-    status_set_voice(s_linked || !s_url[0] ? led[st] : STATUS_SERVER_DOWN);
+    status_t shown = s_linked || !s_url[0] ? led[st] : STATUS_SERVER_DOWN;
+    if (shown == STATUS_OFF && s_auto) shown = STATUS_AUTO_IDLE;
+    status_set_voice(shown);
     ESP_LOGI(TAG, "state: %s", ST_NAME[st]);
 }
 
@@ -136,6 +140,18 @@ void voice_on_button(button_t b, bool pressed)
     } else if (b == BUTTON_K1) {
         if (pressed) start_listening("button");
         else stop_listening("button");
+    } else if (b == BUTTON_BOOT) {
+        // Short press toggles auto (wake word) mode; persisted.
+        if (pressed) {
+            s_auto = !s_auto;
+            settings_set_str("auto", s_auto ? "1" : "0");
+            ESP_LOGI(TAG, "auto mode %s", s_auto ? "on" : "off");
+            if (s_state != ST_SPEAKING) {
+                audio_tone(s_auto ? 660 : 990, 70, 7000);
+                audio_tone(s_auto ? 990 : 660, 70, 7000);
+            }
+            set_state(s_state);   // refresh the idle LED pattern
+        }
     } else if (b == BUTTON_K2 || b == BUTTON_K3) {
         // Volume -/+ is handled locally; neither edge goes to the server.
         if (pressed) set_volume(s_volume + (b == BUTTON_K3 ? VOLUME_STEP : -VOLUME_STEP), true);
@@ -314,6 +330,7 @@ esp_err_t voice_start(void)
     ESP_ERROR_CHECK(aec_init());
     char vol[8];
     if (settings_get_str("volume", vol, sizeof(vol)) == ESP_OK) s_volume = atoi(vol);
+    if (settings_get_str("auto", vol, sizeof(vol)) == ESP_OK) s_auto = vol[0] == '1';
     es8311_set_volume(s_volume);
     link_start();
     return xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 15, NULL, 1) == pdPASS ? ESP_OK : ESP_FAIL;
@@ -341,8 +358,8 @@ esp_err_t voice_set_server(const char *url, const char *token)
 
 void voice_describe(char *out, size_t len)
 {
-    snprintf(out, len, "server=%s link=%s state=%s", s_url[0] ? s_url : "(none)",
-             s_linked ? "up" : "down", ST_NAME[s_state]);
+    snprintf(out, len, "server=%s link=%s state=%s auto=%s", s_url[0] ? s_url : "(none)",
+             s_linked ? "up" : "down", ST_NAME[s_state], s_auto ? "on" : "off");
 }
 
 void voice_aec_test(int ms, int amplitude)

@@ -113,7 +113,8 @@ playback, flushes its buffer and sends `abort`.
 
 | State | LEDs |
 |-------|------|
-| idle, connected | off |
+| idle, connected | heartbeat: faint green double blink every 8 s |
+| idle, auto (wake word) mode | faint slow cyan pulse |
 | listening | solid blue |
 | thinking | purple breathing |
 | speaking | soft green |

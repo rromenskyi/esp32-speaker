@@ -73,9 +73,24 @@ static void status_task(void *arg)
             if (!period || (now % period) < period / 2) { c[0] = MAX_LEVEL; c[1] = MAX_LEVEL / 3; }
             break;
         }
+        case STATUS_AUTO_IDLE: {
+            // Faint, slow (4 s) pulse: "listening for the wake word".
+            float phase = (now % 4000) / 4000.0f;
+            float k = 0.5f - 0.5f * cosf(2 * (float)M_PI * phase);
+            c[1] = (uint8_t)(1 + 5 * k);
+            c[2] = (uint8_t)(1 + 7 * k);
+            break;
+        }
         case STATUS_SERVER_DOWN:
             if (now % 5000 < 150) c[0] = MAX_LEVEL / 2;
             break;
+        case STATUS_OFF: {
+            // Heartbeat while idle: a faint "lub-dub" every 8 s shows the
+            // speaker is alive without lighting up the room.
+            int64_t t = now % 8000;
+            if (t < 80 || (t >= 230 && t < 310)) c[1] = 6;
+            break;
+        }
         default:
             break;
         }

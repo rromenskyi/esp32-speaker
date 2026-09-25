@@ -71,8 +71,11 @@ utterance (a WAV file, or text spoken by macOS `say`) and saves the reply:
 
 On the device console: `server ws://<server-ip>:8790/`. Hold **k1**, speak,
 release: the utterance goes to the server and its reply is played. **k2 / k3**
-are volume − / +. LEDs: blue = listening, purple = thinking, green = speaking,
-short red pulse every 5 s = server unreachable.
+are volume − / +. **boot** (short press) toggles auto mode, where the wake word
+"Старпом" will start listening (in progress). Holding **k1** from power-on for
+15 s reopens the Wi-Fi setup portal. LEDs: blue = listening, purple = thinking, green = speaking, faint green
+double blink every 8 s = idle heartbeat, faint cyan pulse = auto mode, short
+red pulse every 5 s = server unreachable.
 
 ## CI
 
