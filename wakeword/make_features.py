@@ -3,8 +3,8 @@
     python make_features.py <clips_dir> <out_dir> [--augment] [--reps N]
 
 Writes out_dir/{training,validation,testing}/wakeword_mmap. Augmentation mixes
-in AudioSet noise, MIT room impulse responses, EQ/pitch/gain, as in the
-microWakeWord notebook.
+in background noise/music (--bg, SNR range --min-snr..--max-snr), MIT room
+impulse responses, EQ/pitch/gain, as in the microWakeWord notebook.
 """
 import argparse, os
 from mmap_ninja.ragged import RaggedMmap
@@ -17,6 +17,10 @@ ap.add_argument("clips"); ap.add_argument("out")
 ap.add_argument("--augment", action="store_true")
 ap.add_argument("--reps", type=int, default=2)
 ap.add_argument("--duration", type=float, default=3.2)
+ap.add_argument("--bg", nargs="+", default=["audioset_16k"], help="background noise/music dirs")
+ap.add_argument("--min-snr", type=float, default=-5)
+ap.add_argument("--max-snr", type=float, default=10)
+ap.add_argument("--bg-prob", type=float, default=0.75)
 a = ap.parse_args()
 
 clips = Clips(input_directory=a.clips, file_pattern="*.wav", max_clip_duration_s=None,
@@ -25,11 +29,11 @@ aug = Augmentation(
     augmentation_duration_s=a.duration,
     augmentation_probabilities={
         "SevenBandParametricEQ": 0.1, "TanhDistortion": 0.1, "PitchShift": 0.15, "BandStopFilter": 0.1,
-        "AddColorNoise": 0.1, "AddBackgroundNoise": 0.75 if a.augment else 0.0, "Gain": 1.0,
+        "AddColorNoise": 0.1, "AddBackgroundNoise": a.bg_prob if a.augment else 0.0, "Gain": 1.0,
         "RIR": 0.5 if a.augment else 0.0,
     },
-    impulse_paths=["mit_rirs"], background_paths=["audioset_16k"],
-    background_min_snr_db=-5, background_max_snr_db=10, min_jitter_s=0.195, max_jitter_s=0.205)
+    impulse_paths=["mit_rirs"], background_paths=a.bg,
+    background_min_snr_db=a.min_snr, background_max_snr_db=a.max_snr, min_jitter_s=0.195, max_jitter_s=0.205)
 
 for split, name, reps, slide in [("training", "train", a.reps, 10), ("validation", "validation", 1, 10),
                                  ("testing", "test", 1, 1)]:

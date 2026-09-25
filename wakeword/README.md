@@ -25,8 +25,9 @@ deactivate
 
 # 3. Features (augmented with noise + room reverb) and training
 . .venv/bin/activate
-python make_features.py pos_keep feat_pos --augment --reps 2
-python make_features.py native_neg feat_neg --augment --reps 1
+BG="--bg audioset_16k audioset_music_16k --min-snr -10 --max-snr 10 --bg-prob 0.9"
+python make_features.py pos_keep feat_pos --augment --reps 2 $BG
+python make_features.py native_neg feat_neg --augment --reps 1 $BG
 python make_features.py fleurs_clips feat_fleurs_ru --reps 1     # native-language speech
 python train.py feat_pos feat_neg 20000
 ```
@@ -42,6 +43,16 @@ curl --data-binary @stream_state_internal_quant.tflite \
 ```
 
 and test it without the microphone with `POST /wwtest` (see `../models/README.md`).
+
+## Loud backgrounds
+
+A detector trained with the notebook's defaults (background at -5..10 dB SNR)
+held up to about 0 dB and failed once the background was louder than the
+voice — the usual case with music playing in the room and the speaker a few
+metres away. Training with a music-heavy background set at -10..10 dB SNR in
+90% of clips targets that. `download_data.py` doesn't fetch the music set yet:
+it is the AudioSet balanced-train clips whose `human_labels` include "Music",
+a genre ("... music"), singing or instruments (~1250 clips from 8 shards).
 
 ## Why the ASR filter
 
