@@ -23,6 +23,8 @@ esp_err_t wakeword_start(const wakeword_config_t *cfg, wakeword_cb_t on_detect);
 // Feed 16 kHz mono audio (non-blocking; drops if the detector falls behind).
 void wakeword_feed(const int16_t *pcm, size_t samples);
 void wakeword_set_enabled(int on);
+// Full flatbuffer verification of a .tflite image (no interpreter needed).
+int wakeword_model_valid(const void *model, size_t len);
 float wakeword_last_probability(void);   // latest window mean, for tuning
 uint32_t wakeword_last_us(void);         // last inference time
 // Test mode: detections are counted and the peak probability tracked, but the

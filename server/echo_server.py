@@ -22,6 +22,7 @@ import wave
 import websockets
 
 RATE = 16000
+MAX_UTTERANCE_BYTES = RATE * 2 * 30   # 30 s; more is dropped (don't let a client fill memory)
 FRAME_BYTES = RATE * 2 * 20 // 1000   # 20 ms of pcm16 mono
 
 
@@ -50,8 +51,8 @@ async def handle(ws, args):
     t_stop = None
     async for msg in ws:
         if isinstance(msg, bytes):
-            if utterance is not None:
-                utterance.extend(msg)
+            if utterance is not None and len(utterance) < MAX_UTTERANCE_BYTES:
+                utterance.extend(msg[:MAX_UTTERANCE_BYTES - len(utterance)])
             continue
         m = json.loads(msg)
         t = m.get("type")
@@ -101,7 +102,7 @@ async def main():
     ap.add_argument("--token", help="require 'Authorization: Bearer <token>'")
     ap.add_argument("--save", metavar="DIR", help="save each utterance as a WAV file")
     args = ap.parse_args()
-    async with websockets.serve(lambda ws: handle(ws, args), args.host, args.port, max_size=None):
+    async with websockets.serve(lambda ws: handle(ws, args), args.host, args.port, max_size=1 << 20):
         print(f"echo server on ws://{args.host}:{args.port}/", flush=True)
         await asyncio.Future()
 

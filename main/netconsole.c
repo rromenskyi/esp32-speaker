@@ -69,6 +69,28 @@ static void serve(int fd)
     setvbuf(out, NULL, _IOLBF, 256);
     FILE *saved = stdout;
     stdout = out;
+    // With an API token set (console: token <secret>), telnet asks for it too.
+    char want[65] = "";
+    if (settings_get_str("token", want, sizeof(want)) == ESP_OK && want[0]) {
+        char got[65];
+        size_t n = 0;
+        printf("token: ");
+        fflush(stdout);
+        struct timeval tv = {.tv_sec = 30, .tv_usec = 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        for (uint8_t c; n + 1 < sizeof(got) && recv(fd, &c, 1, 0) == 1 && c != '\n';)
+            if (c != '\r' && c >= 0x20) got[n++] = c;
+        got[n] = 0;
+        tv.tv_sec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        if (strcmp(got, want)) {
+            printf("\r\nwrong token\r\n");
+            fflush(stdout);
+            stdout = saved;
+            fclose(out);
+            return;
+        }
+    }
     xStreamBufferReset(s_log);
     s_client = fd;
     printf("esp32-speaker console. 'help' lists commands.\r\nspk> ");

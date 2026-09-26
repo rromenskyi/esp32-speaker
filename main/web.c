@@ -155,16 +155,25 @@ static esp_err_t h_ota(httpd_req_t *req)
 // (bypassing the mic), paced at real time. Returns the peak probability.
 static esp_err_t h_wwtest(httpd_req_t *req)
 {
-    int16_t buf[320];
+    if (!authorized(req)) return ESP_OK;
     int left = req->content_len;
+    if (left <= 0 || left > 16000 * 2 * 15 || (left & 1))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "1..15 s of pcm16 (even byte count)");
+    int16_t buf[320];
+    uint8_t *bytes = (uint8_t *)buf;
+    int have = 0;   // bytes in buf, possibly ending mid-sample
     wakeword_test_begin();
     while (left > 0) {
-        int n = httpd_req_recv(req, (char *)buf, left < (int)sizeof(buf) ? left : (int)sizeof(buf));
+        int n = httpd_req_recv(req, (char *)bytes + have, left < (int)sizeof(buf) - have ? left : (int)sizeof(buf) - have);
         if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
         if (n <= 0) break;
-        wakeword_feed_test(buf, n / 2);
         left -= n;
-        vTaskDelay(pdMS_TO_TICKS(n / 32));   // n bytes = n/32 ms of audio
+        have += n;
+        int samples = have / 2;
+        wakeword_feed_test(buf, samples);
+        vTaskDelay(pdMS_TO_TICKS(samples / 16));   // pace at real time (16 samples/ms)
+        if (have & 1) bytes[0] = bytes[have - 1];  // carry a split sample over
+        have &= 1;
     }
     float peak;
     int hits;
@@ -227,8 +236,12 @@ static esp_err_t h_wwmodel(httpd_req_t *req)
         left -= n;
     }
     free(buf);
-    if (left > 0 || err != ESP_OK || (err = wwmodel_write_finish(w)) != ESP_OK)
+    if (left > 0 || err != ESP_OK) {
+        wwmodel_write_abort(w);
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "model upload failed");
+    }
+    if ((err = wwmodel_write_finish(w)) != ESP_OK)   // validates the model; frees w either way
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not a usable wake word model");
     httpd_resp_sendstr(req, "OK, rebooting\n");
     xTaskCreate(reboot_later, "reboot", 2048, NULL, 5, NULL);
     return ESP_OK;

@@ -56,6 +56,8 @@ esp_err_t wwmodel_write_begin(wwmodel_writer_t **out, size_t len, float cutoff, 
     const esp_partition_t *p = part();
     if (!p) return ESP_ERR_NOT_FOUND;
     if (len == 0 || len > p->size - HEADER_SIZE) return ESP_ERR_INVALID_SIZE;
+    if (!(cutoff > 0.0f && cutoff <= 1.0f) || window < 1 || window > 32 || arena < 8192 || arena > 262144)
+        return ESP_ERR_INVALID_ARG;
     wwmodel_writer_t *w = calloc(1, sizeof(*w));
     if (!w) return ESP_ERR_NO_MEM;
     w->part = p;
@@ -78,9 +80,28 @@ esp_err_t wwmodel_write(wwmodel_writer_t *w, const void *data, size_t len)
 
 esp_err_t wwmodel_write_finish(wwmodel_writer_t *w)
 {
-    esp_err_t err = w->written == w->h.len ? esp_partition_write(w->part, 0, &w->h, sizeof(w->h)) : ESP_ERR_INVALID_SIZE;
+    // Verify the whole flatbuffer in place before writing the header that
+    // makes the model live: a truncated or corrupt upload would otherwise be
+    // loaded at every boot (the partition is shared by both OTA slots).
+    esp_err_t err = w->written == w->h.len ? ESP_OK : ESP_ERR_INVALID_SIZE;
+    if (err == ESP_OK) {
+        const void *map;
+        esp_partition_mmap_handle_t handle;
+        err = esp_partition_mmap(w->part, HEADER_SIZE, w->h.len, ESP_PARTITION_MMAP_DATA, &map, &handle);
+        if (err == ESP_OK) {
+            if (!wakeword_model_valid(map, w->h.len)) err = ESP_ERR_INVALID_RESPONSE;
+            esp_partition_munmap(handle);
+        }
+    }
+    if (err == ESP_OK) err = esp_partition_write(w->part, 0, &w->h, sizeof(w->h));
+    if (err != ESP_OK) ESP_LOGE(TAG, "model rejected: %s", esp_err_to_name(err));
     free(w);
     return err;
+}
+
+void wwmodel_write_abort(wwmodel_writer_t *w)
+{
+    free(w);   // no header was written, so the partition holds no valid model
 }
 
 esp_err_t wwmodel_erase(void)

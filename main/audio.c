@@ -9,6 +9,7 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 
@@ -26,20 +27,28 @@ static i2s_chan_handle_t s_tx, s_rx;
 static uint32_t s_rate;
 static StreamBufferHandle_t s_play;
 static volatile bool s_discard;         // set while flushing: writers drop data
+static SemaphoreHandle_t s_write_lock;  // stream buffers allow only one writer at a time
 static volatile bool s_playing;         // play task emitted real samples last chunk
 
 static void play_task(void *arg)
 {
     int16_t mono[PLAY_CHUNK];
     int16_t frame[PLAY_CHUNK * SLOTS] = {0};
+    uint8_t *bytes = (uint8_t *)mono;
+    size_t carry = 0;   // an odd byte left over from the previous receive
     for (;;) {
-        size_t got = xStreamBufferReceive(s_play, mono, sizeof(mono), pdMS_TO_TICKS(5)) / 2;
+        // The buffer is a byte stream and a receive may end mid-sample; keep
+        // the odd byte for the next round so samples never shift.
+        size_t n = carry + xStreamBufferReceive(s_play, bytes + carry, sizeof(mono) - carry, pdMS_TO_TICKS(5));
+        size_t got = n / 2;
         s_playing = got > 0;
         for (size_t i = 0; i < PLAY_CHUNK; i++) {
             int16_t v = i < got ? mono[i] : 0;
             frame[SLOTS * i] = v;         // left half of the frame -> ES8311 left
             frame[SLOTS * i + 2] = v;     // right half, in case the DAC input is switched
         }
+        carry = n & 1;
+        if (carry) bytes[0] = bytes[n - 1];
         size_t written;
         i2s_channel_write(s_tx, frame, sizeof(frame), &written, portMAX_DELAY);
     }
@@ -73,6 +82,7 @@ esp_err_t audio_init(uint32_t sample_rate)
     uint8_t *storage = heap_caps_malloc(PLAY_BUF_BYTES + 1, MALLOC_CAP_SPIRAM);
     ESP_RETURN_ON_FALSE(storage, ESP_ERR_NO_MEM, TAG, "play buffer");
     s_play = xStreamBufferCreateStatic(PLAY_BUF_BYTES, 1, storage, &sb);
+    s_write_lock = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(play_task, "play", 4096, NULL, 20, NULL, 1);
     return ESP_OK;
 }
@@ -85,12 +95,14 @@ esp_err_t audio_write_mono(const int16_t *pcm, size_t samples)
 esp_err_t audio_write_bytes(const void *data, size_t len)
 {
     const uint8_t *p = data;
+    xSemaphoreTake(s_write_lock, portMAX_DELAY);
     while (len && !s_discard) {
         // Short timeouts so a flush can interrupt a writer blocked on a full buffer.
         size_t n = xStreamBufferSend(s_play, p, len, pdMS_TO_TICKS(20));
         p += n;
         len -= n;
     }
+    xSemaphoreGive(s_write_lock);
     return ESP_OK;
 }
 

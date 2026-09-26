@@ -25,6 +25,7 @@ esp_err_t tca9555_init(uint8_t addr)
 
 esp_err_t tca9555_set_output(int pin, bool level)
 {
+    if (pin < 0 || pin > 15) return ESP_ERR_INVALID_ARG;
     int p = pin / 8;
     uint8_t bit = 1u << (pin % 8);
     s_out[p] = level ? (s_out[p] | bit) : (s_out[p] & ~bit);

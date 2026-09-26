@@ -15,6 +15,7 @@
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/micro_resource_variable.h"
+#include "flatbuffers/flatbuffers.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
 static const char *TAG = "wakeword";
@@ -51,6 +52,9 @@ static bool setup_model(void)
     }
     // Exactly the ops microWakeWord streaming models use.
     static tflite::MicroMutableOpResolver<13> ops;
+    static bool ops_ready;   // wakeword_start may be retried with the built-in model
+    if (!ops_ready) {
+    ops_ready = true;
     ops.AddCallOnce();
     ops.AddVarHandle();
     ops.AddReadVariable();
@@ -64,21 +68,32 @@ static bool setup_model(void)
     ops.AddReshape();
     ops.AddSplitV();
     ops.AddStridedSlice();
+    }
 
     // Internal RAM is faster for the arena; fall back to PSRAM if short.
     uint8_t *arena = (uint8_t *)heap_caps_aligned_alloc(16, s_cfg.arena_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!arena) arena = (uint8_t *)heap_caps_aligned_alloc(16, s_cfg.arena_size, MALLOC_CAP_SPIRAM);
     if (!arena) return false;
     tflite::MicroAllocator *allocator = tflite::MicroAllocator::Create(arena, s_cfg.arena_size);
-    tflite::MicroResourceVariables *vars = tflite::MicroResourceVariables::Create(allocator, 20);
-    s_interp = new tflite::MicroInterpreter(model, ops, allocator, vars);
-    if (s_interp->AllocateTensors() != kTfLiteOk) {
-        ESP_LOGE(TAG, "AllocateTensors failed (arena %u bytes too small?)", (unsigned)s_cfg.arena_size);
-        return false;
+    tflite::MicroResourceVariables *vars = allocator ? tflite::MicroResourceVariables::Create(allocator, 20) : nullptr;
+    s_interp = vars ? new tflite::MicroInterpreter(model, ops, allocator, vars) : nullptr;
+    const char *why = nullptr;
+    if (!s_interp) why = "allocator setup";
+    else if (s_interp->AllocateTensors() != kTfLiteOk) why = "AllocateTensors (arena too small?)";
+    else {
+        TfLiteTensor *in = s_interp->input(0);
+        TfLiteTensor *out = s_interp->output(0);
+        if (in->type != kTfLiteInt8 || in->dims->size != 3 || in->dims->data[1] != STRIDE ||
+            in->dims->data[2] != FEATURE_SIZE || out->type != kTfLiteUInt8)
+            why = "unexpected model input/output";
     }
-    TfLiteTensor *in = s_interp->input(0);
-    if (in->type != kTfLiteInt8 || in->dims->size != 3 || in->dims->data[1] != STRIDE || in->dims->data[2] != FEATURE_SIZE) {
-        ESP_LOGE(TAG, "unexpected model input");
+    if (why) {
+        // The allocator, variables and interpreter all live in the arena
+        // (the interpreter object itself is on the heap).
+        ESP_LOGE(TAG, "model setup failed: %s", why);
+        delete s_interp;
+        s_interp = nullptr;
+        heap_caps_free(arena);
         return false;
     }
     ESP_LOGI(TAG, "model ready: arena used %u of %u bytes", (unsigned)s_interp->arena_used_bytes(), (unsigned)s_cfg.arena_size);
@@ -176,7 +191,14 @@ extern "C" esp_err_t wakeword_start(const wakeword_config_t *cfg, wakeword_cb_t 
 {
     s_cfg = *cfg;
     s_cb = on_detect;
-    setup_frontend();
+    if (!wakeword_model_valid(cfg->model, cfg->model_len)) {
+        ESP_LOGE(TAG, "model fails flatbuffer verification");
+        return ESP_ERR_INVALID_ARG;
+    }
+    // May be called again with the built-in model after an uploaded one
+    // failed: the frontend is set up once, the task only after a model loads.
+    static bool frontend_ready;
+    if (!frontend_ready) { setup_frontend(); frontend_ready = true; }
     if (!setup_model()) return ESP_FAIL;
     s_audio = xStreamBufferCreate(FEED_BYTES, 320);
     return xTaskCreatePinnedToCore(detector_task, "wakeword", 6144, NULL, 8, NULL, 0) == pdPASS ? ESP_OK : ESP_FAIL;
@@ -195,6 +217,12 @@ extern "C" void wakeword_feed_test(const int16_t *pcm, size_t samples)
 }
 
 extern "C" void wakeword_set_enabled(int on) { s_enabled = on; }
+
+extern "C" int wakeword_model_valid(const void *model, size_t len)
+{
+    flatbuffers::Verifier v(static_cast<const uint8_t *>(model), len);
+    return tflite::VerifyModelBuffer(v) ? 1 : 0;
+}
 extern "C" float wakeword_last_probability(void) { return s_last_prob; }
 extern "C" uint32_t wakeword_last_us(void) { return s_last_us; }
 

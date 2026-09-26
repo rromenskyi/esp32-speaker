@@ -36,6 +36,9 @@ typedef enum { ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING } state_t;
 static const char *const ST_NAME[] = {"idle", "listening", "thinking", "speaking"};
 
 static esp_websocket_client_handle_t s_ws;
+// Guards the client handle for senders vs. replacement (voice_set_server).
+// Never held while taking s_lock, and never held across client stop/destroy.
+static SemaphoreHandle_t s_ws_lock;
 static SemaphoreHandle_t s_lock;            // guards state + client handle
 static volatile state_t s_state = ST_IDLE;
 static volatile bool s_linked;              // WebSocket connected and hello sent
@@ -53,21 +56,36 @@ static int s_speech_ms, s_silence_ms; // VAD bookkeeping for wake-word utterance
 #define WAKE_END_SILENCE_MS 700   // stop after this much silence following speech
 #define WAKE_NO_SPEECH_MS   4000  // give up if no speech follows the wake word
 
+static const int16_t *volatile s_inject;   // see voice_ask_injected
+
 static void set_state(state_t st)
 {
+    if (st != ST_LISTENING) s_inject = NULL;   // an injected utterance ends with listening
     s_state = st;
     s_state_since_ms = now_ms();
     static const status_t led[] = {STATUS_OFF, STATUS_LISTENING, STATUS_THINKING, STATUS_SPEAKING};
     status_t shown = s_linked || !s_url[0] ? led[st] : STATUS_SERVER_DOWN;
     if (shown == STATUS_OFF && s_auto) shown = STATUS_AUTO_IDLE;
     status_set_voice(shown);
-    ESP_LOGI(TAG, "state: %s", ST_NAME[st]);
+    static state_t logged = (state_t)-1;
+    if (st != logged) ESP_LOGI(TAG, "state: %s", ST_NAME[st]);   // heartbeats re-enter thinking
+    logged = st;
 }
 
 static void send_json(const char *json)
 {
+    xSemaphoreTake(s_ws_lock, portMAX_DELAY);
     if (s_ws && s_linked) esp_websocket_client_send_text(s_ws, json, strlen(json), pdMS_TO_TICKS(500));
+    xSemaphoreGive(s_ws_lock);
 }
+
+static void send_audio(const int16_t *pcm, size_t samples)
+{
+    xSemaphoreTake(s_ws_lock, portMAX_DELAY);
+    if (s_ws && s_linked) esp_websocket_client_send_bin(s_ws, (const char *)pcm, samples * 2, pdMS_TO_TICKS(100));
+    xSemaphoreGive(s_ws_lock);
+}
+
 
 static void send_listen(const char *state, const char *reason)
 {
@@ -290,15 +308,30 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         audio_play_flush();
         set_state(ST_IDLE);
         break;
-    case WEBSOCKET_EVENT_DATA:
-        if (e->op_code == 0x1) {
-            handle_text(e->data_ptr, e->data_len);
-        } else if ((e->op_code == 0x2 || e->op_code == 0x0) && s_state == ST_SPEAKING) {
+    case WEBSOCKET_EVENT_DATA: {
+        // A message larger than the client buffer arrives in several events
+        // (payload_offset/payload_len); continuation frames carry op_code 0
+        // and belong to whatever message type started them.
+        static char text[4096];
+        static bool in_text;
+        if (e->op_code == 0x1 || (e->op_code == 0x0 && in_text)) {
+            in_text = true;
+            if (e->payload_len <= (int)sizeof(text) && e->payload_offset + e->data_len <= (int)sizeof(text))
+                memcpy(text + e->payload_offset, e->data_ptr, e->data_len);
+            if (e->payload_offset + e->data_len >= e->payload_len) {
+                if (e->payload_len <= (int)sizeof(text)) handle_text(text, e->payload_len);
+                else ESP_LOGW(TAG, "dropping a %d-byte control message", e->payload_len);
+                in_text = false;
+            }
+        } else if (e->op_code == 0x2 || e->op_code == 0x0) {
+            in_text = false;
+            if (s_state != ST_SPEAKING) break;
             // Blocks when the playback buffer is full: that stalls the socket
             // reader, which is exactly the TCP back pressure the protocol wants.
             audio_write_bytes(e->data_ptr, e->data_len);
         }
         break;
+    }
     default:
         break;
     }
@@ -306,7 +339,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 // Injected utterance (POST /ask): while set, the mic task streams these samples
 // instead of the microphone — a remote end-to-end test of the device path.
-static const int16_t *volatile s_inject;
+// Cleared by the mic task after the last frame, or by any exit from listening.
 static volatile size_t s_inject_len, s_inject_pos;
 
 esp_err_t voice_ask_injected(const int16_t *pcm, size_t samples)
@@ -318,35 +351,57 @@ esp_err_t voice_ask_injected(const int16_t *pcm, size_t samples)
     s_inject = pcm;
     start_listening("button");
     xSemaphoreGive(s_lock);
-    while (s_inject) vTaskDelay(pdMS_TO_TICKS(20));   // mic task clears it after the last frame
-    return ESP_OK;
+    // The caller frees pcm on return, so wait until the mic task is done with
+    // it — bounded, and the pointer is cleared under the lock if we give up.
+    int64_t deadline = now_ms() + samples / 16 + 5000;
+    while (s_inject && now_ms() < deadline) vTaskDelay(pdMS_TO_TICKS(20));
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool done = s_inject == NULL;
+    s_inject = NULL;
+    xSemaphoreGive(s_lock);
+    return done ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 // Raw capture tap for the console (mic/rec/loop): mic_task is the only reader
 // of the I2S RX channel, so it copies raw TDM frames here on request.
-static int16_t *volatile s_tap_buf;
+static int16_t *s_tap_buf;
 static size_t s_tap_frames, s_tap_pos;
-static SemaphoreHandle_t s_tap_done;
+static SemaphoreHandle_t s_tap_done, s_tap_owner, s_tap_lock;
 
 esp_err_t voice_capture_raw(int16_t *tdm, size_t frames)
 {
-    if (!s_tap_done) s_tap_done = xSemaphoreCreateBinary();
+    // One capture at a time (USB and telnet consoles can both ask); the
+    // pointer is only touched under s_tap_lock, so a timeout never leaves the
+    // mic task writing into a buffer the caller has already released.
+    if (xSemaphoreTake(s_tap_owner, pdMS_TO_TICKS(100)) != pdTRUE) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_tap_done, 0);
+    xSemaphoreTake(s_tap_lock, portMAX_DELAY);
     s_tap_frames = frames;
     s_tap_pos = 0;
     s_tap_buf = tdm;
+    xSemaphoreGive(s_tap_lock);
     bool ok = xSemaphoreTake(s_tap_done, pdMS_TO_TICKS(frames / 16 + 1000)) == pdTRUE;
+    xSemaphoreTake(s_tap_lock, portMAX_DELAY);
     s_tap_buf = NULL;
+    xSemaphoreGive(s_tap_lock);
+    xSemaphoreGive(s_tap_owner);
     return ok ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 static void tap_feed(const int16_t *tdm, size_t frames)
 {
+    xSemaphoreTake(s_tap_lock, portMAX_DELAY);
     int16_t *dst = s_tap_buf;
-    if (!dst || s_tap_pos >= s_tap_frames) return;
-    size_t n = s_tap_frames - s_tap_pos < frames ? s_tap_frames - s_tap_pos : frames;
-    memcpy(dst + s_tap_pos * AUDIO_MIC_SLOTS, tdm, n * AUDIO_MIC_SLOTS * sizeof(int16_t));
-    s_tap_pos += n;
-    if (s_tap_pos >= s_tap_frames) xSemaphoreGive(s_tap_done);
+    if (dst && s_tap_pos < s_tap_frames) {
+        size_t n = s_tap_frames - s_tap_pos < frames ? s_tap_frames - s_tap_pos : frames;
+        memcpy(dst + s_tap_pos * AUDIO_MIC_SLOTS, tdm, n * AUDIO_MIC_SLOTS * sizeof(int16_t));
+        s_tap_pos += n;
+        if (s_tap_pos >= s_tap_frames) {
+            s_tap_buf = NULL;
+            xSemaphoreGive(s_tap_done);
+        }
+    }
+    xSemaphoreGive(s_tap_lock);
 }
 
 // Reads the mic continuously (keeps the RX DMA fresh) and streams 20 ms frames
@@ -367,22 +422,28 @@ static void mic_task(void *arg)
         bool speech = aec_process(mono, ref, mono, cancelled);
         if (s_auto) wakeword_feed(cancelled, FRAME_SAMPLES);
         state_t st = s_state;
-        if (s_inject && st == ST_LISTENING) {
-            size_t n = s_inject_len - s_inject_pos < FRAME_SAMPLES ? s_inject_len - s_inject_pos : FRAME_SAMPLES;
-            memset(mono, 0, sizeof(mono));
-            memcpy(mono, s_inject + s_inject_pos, n * sizeof(int16_t));
-            s_inject_pos += n;
-            if (s_inject_pos >= s_inject_len) {
-                esp_websocket_client_send_bin(s_ws, (const char *)mono, sizeof(mono), pdMS_TO_TICKS(100));
+        if (st == ST_LISTENING) {
+            // Copy the injected frame under s_lock: an exit from listening
+            // clears s_inject, after which the caller frees the samples.
+            bool last = false;
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            const int16_t *inj = s_inject;
+            if (inj && s_state == ST_LISTENING) {
+                size_t n = s_inject_len - s_inject_pos < FRAME_SAMPLES ? s_inject_len - s_inject_pos : FRAME_SAMPLES;
+                memset(mono, 0, sizeof(mono));
+                memcpy(mono, inj + s_inject_pos, n * sizeof(int16_t));
+                s_inject_pos += n;
+                last = s_inject_pos >= s_inject_len;
+            }
+            xSemaphoreGive(s_lock);
+            send_audio(mono, FRAME_SAMPLES);
+            if (last) {
                 xSemaphoreTake(s_lock, portMAX_DELAY);
-                stop_listening("button");
+                stop_listening("button");   // leaving listening clears s_inject
                 xSemaphoreGive(s_lock);
-                s_inject = NULL;
                 continue;
             }
         }
-        if (st == ST_LISTENING && s_linked)
-            esp_websocket_client_send_bin(s_ws, (const char *)mono, sizeof(mono), pdMS_TO_TICKS(100));
         if (st == ST_LISTENING && s_wake_listen) {
             // No button to release after a wake word: end on silence.
             if (speech) { s_speech_ms += 20; s_silence_ms = 0; }
@@ -426,9 +487,12 @@ static void link_start(void)
         .pingpong_timeout_sec = 25,
         .task_stack = 6144,
     };
-    s_ws = esp_websocket_client_init(&cfg);
-    esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
-    esp_websocket_client_start(s_ws);
+    esp_websocket_client_handle_t ws = esp_websocket_client_init(&cfg);
+    esp_websocket_register_events(ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
+    xSemaphoreTake(s_ws_lock, portMAX_DELAY);
+    s_ws = ws;
+    xSemaphoreGive(s_ws_lock);
+    esp_websocket_client_start(ws);
     status_set_voice(STATUS_SERVER_DOWN);
     ESP_LOGI(TAG, "connecting to %s", s_url);
 }
@@ -436,6 +500,10 @@ static void link_start(void)
 esp_err_t voice_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+    s_ws_lock = xSemaphoreCreateMutex();
+    s_tap_done = xSemaphoreCreateBinary();
+    s_tap_owner = xSemaphoreCreateMutex();
+    s_tap_lock = xSemaphoreCreateMutex();
     esp_timer_create_args_t ptt = {.callback = ptt_timer_cb, .name = "ptt"};
     ESP_ERROR_CHECK(esp_timer_create(&ptt, &s_ptt_timer));
     ESP_ERROR_CHECK(aec_init());
@@ -450,8 +518,14 @@ esp_err_t voice_start(void)
         .sliding_window = 5,
         .arena_size = 26080 + 8192,
     };
-    if (!wwmodel_load(&ww, s_ww_name, sizeof(s_ww_name))) strlcpy(s_ww_name, "okay_nabu (built-in)", sizeof(s_ww_name));
-    if (wakeword_start(&ww, on_wake) != ESP_OK) ESP_LOGE(TAG, "wake word detector failed to start");
+    const wakeword_config_t builtin = ww;
+    strlcpy(s_ww_name, "okay_nabu (built-in)", sizeof(s_ww_name));
+    bool from_flash = wwmodel_load(&ww, s_ww_name, sizeof(s_ww_name));
+    if (wakeword_start(&ww, on_wake) != ESP_OK) {
+        ESP_LOGE(TAG, "wake word model \"%s\" failed to start%s", s_ww_name, from_flash ? ", using the built-in one" : "");
+        strlcpy(s_ww_name, "okay_nabu (built-in, fallback)", sizeof(s_ww_name));
+        if (!from_flash || wakeword_start(&builtin, on_wake) != ESP_OK) ESP_LOGE(TAG, "wake word detector disabled");
+    }
     char vol[8];
     if (settings_get_str("volume", vol, sizeof(vol)) == ESP_OK) s_volume = atoi(vol);
     if (settings_get_str("auto", vol, sizeof(vol)) == ESP_OK) s_auto = vol[0] == '1';
@@ -465,16 +539,19 @@ esp_err_t voice_set_server(const char *url, const char *token)
     esp_err_t err = url && url[0] ? settings_set_str("server_url", url) : settings_erase("server_url");
     if (err == ESP_OK) err = token && token[0] ? settings_set_str("server_token", token) : settings_erase("server_token");
     if (err != ESP_OK) return err;
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_ws) {
-        esp_websocket_client_handle_t old = s_ws;
-        s_ws = NULL;
-        s_linked = false;
-        xSemaphoreGive(s_lock);
+    // Detach the old client under s_ws_lock (waits for any send in progress),
+    // then stop/destroy it with no locks held: its event handler may itself
+    // need s_lock or s_ws_lock while the client task shuts down.
+    xSemaphoreTake(s_ws_lock, portMAX_DELAY);
+    esp_websocket_client_handle_t old = s_ws;
+    s_ws = NULL;
+    s_linked = false;
+    xSemaphoreGive(s_ws_lock);
+    if (old) {
         esp_websocket_client_stop(old);
         esp_websocket_client_destroy(old);
-        xSemaphoreTake(s_lock, portMAX_DELAY);
     }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     link_start();
     xSemaphoreGive(s_lock);
     return ESP_OK;
