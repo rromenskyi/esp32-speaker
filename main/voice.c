@@ -6,6 +6,7 @@
 #include <string.h>
 #include "aec.h"
 #include "media.h"
+#include "wakeclips.h"
 #include "wakeword.h"
 #include "wwmodel.h"
 #include "audio.h"
@@ -180,6 +181,7 @@ static void set_volume(int v, bool beep)
 
 static void on_wake(float probability)
 {
+    wakeclips_capture(probability, ST_NAME[s_state]);
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_auto && s_linked && s_state != ST_LISTENING) {
         ESP_LOGI(TAG, "wake word (p=%.2f) while %s", probability, ST_NAME[s_state]);
@@ -461,7 +463,10 @@ static void mic_task(void *arg)
         // Every frame, not only while listening: the canceller keeps adapting
         // while the speaker talks, so it has converged when the user barges in.
         bool speech = aec_process(mono, ref, mono, cancelled);
-        if (s_auto) wakeword_feed(cancelled, FRAME_SAMPLES);
+        if (s_auto) {
+            wakeword_feed(cancelled, FRAME_SAMPLES);
+            wakeclips_feed(cancelled, FRAME_SAMPLES);
+        }
         state_t st = s_state;
         if (st == ST_LISTENING) {
             // Copy the injected frame under s_lock: an exit from listening
@@ -552,6 +557,7 @@ esp_err_t voice_start(void)
     esp_timer_create_args_t ptt = {.callback = ptt_timer_cb, .name = "ptt"};
     ESP_ERROR_CHECK(esp_timer_create(&ptt, &s_ptt_timer));
     ESP_ERROR_CHECK(aec_init());
+    ESP_ERROR_CHECK(wakeclips_init());
     ESP_ERROR_CHECK(media_start(on_media));
     // Wake word model: an uploaded one in the `model` partition (POST
     // /wwmodel), else the built-in okay_nabu (see models/).

@@ -14,6 +14,7 @@
 #include "ota.h"
 #include "settings.h"
 #include "voice.h"
+#include "wakeclips.h"
 #include "wakeword.h"
 #include "wwmodel.h"
 #include "wifi.h"
@@ -313,7 +314,7 @@ esp_err_t web_start(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
     cfg.lru_purge_enable = true;
-    cfg.max_uri_handlers = 24;   // default is 8; registering past it fails silently
+    cfg.max_uri_handlers = 32;   // default is 8; registering past it fails silently
     httpd_handle_t srv;
     esp_err_t err = httpd_start(&srv, &cfg);
     if (err != ESP_OK) return err;
@@ -331,6 +332,7 @@ esp_err_t web_start(void)
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) httpd_register_uri_handler(srv, &uris[i]);
     library_register(srv);
+    wakeclips_register(srv);
     httpd_register_err_handler(srv, HTTPD_404_NOT_FOUND, h_404);
     xTaskCreate(dns_task, "dns", 3072, NULL, 4, NULL);
     return ESP_OK;
