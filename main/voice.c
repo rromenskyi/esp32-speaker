@@ -82,7 +82,10 @@ static void send_json(const char *json)
 static void send_audio(const int16_t *pcm, size_t samples)
 {
     xSemaphoreTake(s_ws_lock, portMAX_DELAY);
-    if (s_ws && s_linked) esp_websocket_client_send_bin(s_ws, (const char *)pcm, samples * 2, pdMS_TO_TICKS(100));
+    // A send that times out makes esp_websocket_client drop the whole link, so
+    // allow for a Wi-Fi stall (the TCP buffer holds ~1 s of audio) rather
+    // than losing the conversation.
+    if (s_ws && s_linked) esp_websocket_client_send_bin(s_ws, (const char *)pcm, samples * 2, pdMS_TO_TICKS(500));
     xSemaphoreGive(s_ws_lock);
 }
 
