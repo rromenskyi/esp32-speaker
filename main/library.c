@@ -29,6 +29,23 @@ static char s_current[NAME_MAX_BYTES + 1];   // library track playing (for "next
 
 // --- card -------------------------------------------------------------------
 
+// Drop *.part files left by uploads cut short (power loss, reboot).
+static void remove_partials(void)
+{
+    DIR *d = opendir(MUSIC_DIR);
+    struct dirent *e;
+    char path[sizeof(MUSIC_DIR) + 260];
+    while (d && (e = readdir(d))) {
+        size_t len = strlen(e->d_name);
+        if (len > 5 && !strcmp(e->d_name + len - 5, ".part")) {
+            snprintf(path, sizeof(path), MUSIC_DIR "/%s", e->d_name);
+            unlink(path);
+            ESP_LOGW(TAG, "removed unfinished upload %s", e->d_name);
+        }
+    }
+    if (d) closedir(d);
+}
+
 static esp_err_t mount(bool format_if_needed)
 {
     esp_vfs_fat_sdmmc_mount_config_t mc = {
@@ -52,6 +69,7 @@ static esp_err_t mount(bool format_if_needed)
         return err;
     }
     mkdir(MUSIC_DIR, 0777);
+    remove_partials();
     ESP_LOGI(TAG, "SD card: %s, %llu MB", s_card->cid.name,
              (unsigned long long)s_card->csd.capacity * s_card->csd.sector_size / (1024 * 1024));
     return ESP_OK;
@@ -200,8 +218,7 @@ static esp_err_t h_upload(httpd_req_t *req)
     int left = req->content_len;
     bool ok = f != NULL;
     while (ok && left > 0) {
-        int n = httpd_req_recv(req, buf, left < (int)BUF ? left : (int)BUF);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        int n = web_recv(req, buf, left < (int)BUF ? left : (int)BUF);
         if (n <= 0 || fwrite(buf, 1, n, f) != (size_t)n) ok = false;
         else left -= n;
     }

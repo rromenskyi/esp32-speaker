@@ -48,6 +48,19 @@ bool web_authorized(httpd_req_t *req)
     return false;
 }
 
+int web_recv(httpd_req_t *req, char *buf, size_t len)
+{
+    // httpd_req_recv() times out every recv_wait_timeout (5 s); retrying
+    // forever let a vanished client hold the only server worker, and the whole
+    // web interface hung. Three in a row (~15 s of silence) end the request.
+    for (int tries = 0; tries < 3; tries++) {
+        int n = httpd_req_recv(req, buf, len);
+        if (n != HTTPD_SOCK_ERR_TIMEOUT) return n;
+    }
+    ESP_LOGW(TAG, "%s: client stalled, dropping the request", req->uri);
+    return HTTPD_SOCK_ERR_TIMEOUT;
+}
+
 static esp_err_t h_root(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -135,8 +148,7 @@ static esp_err_t h_ota(httpd_req_t *req)
     char *buf = malloc(4096);
     int left = req->content_len;
     while (buf && left > 0) {
-        int n = httpd_req_recv(req, buf, left < 4096 ? left : 4096);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        int n = web_recv(req, buf, left < 4096 ? left : 4096);
         if (n <= 0 || (err = ota_job_write(job, buf, n)) != ESP_OK) break;
         left -= n;
     }
@@ -165,8 +177,7 @@ static esp_err_t h_wwtest(httpd_req_t *req)
     int have = 0;   // bytes in buf, possibly ending mid-sample
     wakeword_test_begin();
     while (left > 0) {
-        int n = httpd_req_recv(req, (char *)bytes + have, left < (int)sizeof(buf) - have ? left : (int)sizeof(buf) - have);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        int n = web_recv(req, (char *)bytes + have, left < (int)sizeof(buf) - have ? left : (int)sizeof(buf) - have);
         if (n <= 0) break;
         left -= n;
         have += n;
@@ -197,8 +208,7 @@ static esp_err_t h_ask(httpd_req_t *req)
     if (!pcm) return httpd_resp_send_500(req);
     int got = 0;
     while (got < len) {
-        int n = httpd_req_recv(req, (char *)pcm + got, len - got);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        int n = web_recv(req, (char *)pcm + got, len - got);
         if (n <= 0) break;
         got += n;
     }
@@ -231,8 +241,7 @@ static esp_err_t h_wwmodel(httpd_req_t *req)
     char *buf = malloc(4096);
     int left = req->content_len;
     while (buf && left > 0) {
-        int n = httpd_req_recv(req, buf, left < 4096 ? left : 4096);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        int n = web_recv(req, buf, left < 4096 ? left : 4096);
         if (n <= 0 || (err = wwmodel_write(w, buf, n)) != ESP_OK) break;
         left -= n;
     }
