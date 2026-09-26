@@ -14,6 +14,7 @@
 #include "esp_console.h"
 #include "i2c_bus.h"
 #include "leds.h"
+#include "media.h"
 #include "status.h"
 #include "voice.h"
 #include "settings.h"
@@ -228,6 +229,32 @@ static int cmd_status(int argc, char **argv)
     return 1;
 }
 
+// top [ms]: CPU share per task over a window (run-time stats deltas).
+static int cmd_top(int argc, char **argv)
+{
+    enum { MAX_TASKS = 40 };
+    int ms = argc > 1 ? num(argv[1]) : 2000;
+    TaskStatus_t *a = calloc(2 * MAX_TASKS, sizeof(TaskStatus_t)), *b = a + MAX_TASKS;
+    if (!a) return 1;
+    configRUN_TIME_COUNTER_TYPE ta, tb;
+    UBaseType_t na = uxTaskGetSystemState(a, MAX_TASKS, &ta);
+    vTaskDelay(pdMS_TO_TICKS(ms));
+    UBaseType_t nb = uxTaskGetSystemState(b, MAX_TASKS, &tb);
+    // The total counts both cores: 100% here is one core fully busy.
+    double span = (double)(tb - ta) / 100.0;
+    printf("%-16s core  cpu%%  stack-free\n", "task");
+    for (UBaseType_t i = 0; i < nb; i++) {
+        configRUN_TIME_COUNTER_TYPE prev = 0;
+        for (UBaseType_t j = 0; j < na; j++)
+            if (a[j].xHandle == b[i].xHandle) prev = a[j].ulRunTimeCounter;
+        BaseType_t core = xTaskGetCoreID(b[i].xHandle);
+        printf("%-16s %4s %5.1f  %u\n", b[i].pcTaskName, core == tskNO_AFFINITY ? "-" : core ? "1" : "0",
+               span > 0 ? (b[i].ulRunTimeCounter - prev) / span : 0.0, (unsigned)b[i].usStackHighWaterMark);
+    }
+    free(a);
+    return 0;
+}
+
 static int cmd_server(int argc, char **argv)
 {
     // server: show; server <url> [token]: set and reconnect; server -: disable.
@@ -268,6 +295,15 @@ static int cmd_auto(int argc, char **argv)
     return 0;
 }
 
+static int cmd_music(int argc, char **argv)
+{
+    // music <url> [title] | music stop | music pause (toggles)
+    if (argc >= 2 && !strcmp(argv[1], "stop")) { media_stop(); return 0; }
+    if (argc >= 2 && !strcmp(argv[1], "pause")) { media_pause(media_state() == MEDIA_PLAYING); return 0; }
+    if (argc < 2) { printf("music <http(s) mp3 url> [title] | music stop | music pause\n"); return 1; }
+    return media_play(argv[1], argc > 2 ? argv[2] : "") == ESP_OK ? 0 : 1;
+}
+
 static int cmd_px(int argc, char **argv)
 {
     // px <index> <r> <g> <b>: light one pixel, everything else off.
@@ -306,6 +342,8 @@ void console_start(void)
         {.command = "server", .help = "server [<ws-url> [token] | -]: voice server", .func = cmd_server},
         {.command = "aec",  .help = "aec on|off | aec test [ms] [amp]: echo canceller", .func = cmd_aec},
         {.command = "auto", .help = "auto on|off: wake word mode", .func = cmd_auto},
+        {.command = "music", .help = "music <url> [title] | stop | pause: stream an MP3 (radio, file)", .func = cmd_music},
+        {.command = "top",  .help = "top [ms]: CPU per task (100 = one core)", .func = cmd_top},
         {.command = "px",   .help = "px <index> <r> <g> <b>: light one pixel only", .func = cmd_px},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)

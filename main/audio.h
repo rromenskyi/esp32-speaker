@@ -12,6 +12,16 @@ esp_err_t audio_write_mono(const int16_t *pcm, size_t samples);
 esp_err_t audio_write_bytes(const void *pcm16le, size_t len);
 esp_err_t audio_tone(int hz, int ms, int amplitude);
 void audio_play_flush(void);            // drop everything queued for playback
+
+// Music: 48 kHz (BOARD_BUS_RATE) mono, mixed under the voice stream.
+esp_err_t audio_media_write(const int16_t *pcm, size_t samples);   // blocks when full
+void audio_media_flush(void);
+size_t audio_media_buffered_ms(void);
+void audio_set_media_gain(float gain);  // 0..1, ramped (ducking)
 bool audio_play_idle(void);             // queue empty and the last chunk played
+// Which capture slots audio_read() fills (bit n = slot n; default all). The
+// rest read as zeros: resampling costs CPU per slot. A slot switched back on
+// replays a few ms of stale filter state.
+void audio_set_capture_slots(uint32_t mask);
 // Blocking read of `frames` capture frames, AUDIO_MIC_SLOTS int16 samples each.
 esp_err_t audio_read(int16_t *frames, size_t frames_count);

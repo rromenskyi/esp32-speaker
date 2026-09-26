@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "aec.h"
+#include "media.h"
 #include "wakeword.h"
 #include "wwmodel.h"
 #include "audio.h"
@@ -31,6 +32,7 @@ static const char *TAG = "voice";
                                             // the server is gone, back to idle
 #define MIC_SLOT          0                 // one of the two mics (slot 2 is the other)
 #define REF_SLOT          1                 // hardware loopback of the speaker output
+#define VOICE_SLOTS       ((1u << MIC_SLOT) | (1u << REF_SLOT))   // all the voice path reads
 
 typedef enum { ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING } state_t;
 static const char *const ST_NAME[] = {"idle", "listening", "thinking", "speaking"};
@@ -57,6 +59,7 @@ static int s_speech_ms, s_silence_ms; // VAD bookkeeping for wake-word utterance
 #define WAKE_NO_SPEECH_MS   4000  // give up if no speech follows the wake word
 
 static const int16_t *volatile s_inject;   // see voice_ask_injected
+#define MEDIA_DUCK_GAIN 0.12f                // music level under the assistant (~-18 dB)
 
 static void set_state(state_t st)
 {
@@ -64,6 +67,9 @@ static void set_state(state_t st)
     s_state = st;
     s_state_since_ms = now_ms();
     static const status_t led[] = {STATUS_OFF, STATUS_LISTENING, STATUS_THINKING, STATUS_SPEAKING};
+    // Music: silent while listening (it would reach the mic and the server's
+    // speech recognition), ducked while the assistant thinks or talks.
+    audio_set_media_gain(st == ST_IDLE ? 1.0f : st == ST_LISTENING ? 0.0f : MEDIA_DUCK_GAIN);
     status_t shown = s_linked || !s_url[0] ? led[st] : STATUS_SERVER_DOWN;
     if (shown == STATUS_OFF && s_auto) shown = STATUS_AUTO_IDLE;
     status_set_voice(shown);
@@ -183,6 +189,18 @@ static void on_wake(float probability)
     xSemaphoreGive(s_lock);
 }
 
+// Media player events -> server ({"type":"media","state":...}).
+static void on_media(const char *state, const char *detail)
+{
+    cJSON *m = cJSON_CreateObject();
+    cJSON_AddStringToObject(m, "type", "media");
+    cJSON_AddStringToObject(m, "state", state);
+    if (detail && detail[0]) cJSON_AddStringToObject(m, !strcmp(state, "error") ? "message" : "title", detail);
+    char *txt = cJSON_PrintUnformatted(m);
+    if (txt) { send_json(txt); cJSON_free(txt); }
+    cJSON_Delete(m);
+}
+
 void voice_set_auto(bool on)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -219,6 +237,8 @@ void voice_on_button(button_t b, bool pressed)
                     audio_play_flush();
                     send_json("{\"type\":\"abort\",\"reason\":\"button\"}");
                     set_state(ST_IDLE);
+                } else if (s_state == ST_IDLE && media_state() != MEDIA_STOPPED) {
+                    media_pause(media_state() == MEDIA_PLAYING);   // tap = pause / resume
                 } else {
                     ESP_LOGI(TAG, "k1 tap ignored (%s)", ST_NAME[s_state]);
                 }
@@ -274,6 +294,19 @@ static void handle_text(const char *data, int len)
         // Also the server's heartbeat while it works: re-entering the state
         // restarts the THINK_TIMEOUT_MS countdown.
         if (s_state != ST_SPEAKING && s_state != ST_LISTENING) set_state(ST_THINKING);
+    } else if (!strcmp(type, "media")) {
+        const char *action = cJSON_GetStringValue(cJSON_GetObjectItem(j, "action"));
+        if (action && !strcmp(action, "play")) {
+            const char *url = cJSON_GetStringValue(cJSON_GetObjectItem(j, "url"));
+            const char *title = cJSON_GetStringValue(cJSON_GetObjectItem(j, "title"));
+            if (!url || media_play(url, title) != ESP_OK) send_json("{\"type\":\"media\",\"state\":\"error\",\"message\":\"bad url\"}");
+        } else if (action && !strcmp(action, "stop")) {
+            media_stop();
+        } else if (action && !strcmp(action, "pause")) {
+            media_pause(true);
+        } else if (action && !strcmp(action, "resume")) {
+            media_pause(false);
+        }
     } else if (!strcmp(type, "set")) {
         cJSON *v = cJSON_GetObjectItem(j, "volume");
         if (cJSON_IsNumber(v)) set_volume(v->valueint, false);
@@ -383,10 +416,12 @@ esp_err_t voice_capture_raw(int16_t *tdm, size_t frames)
     s_tap_pos = 0;
     s_tap_buf = tdm;
     xSemaphoreGive(s_tap_lock);
+    audio_set_capture_slots(0xf);   // raw captures want every slot
     bool ok = xSemaphoreTake(s_tap_done, pdMS_TO_TICKS(frames / 16 + 1000)) == pdTRUE;
     xSemaphoreTake(s_tap_lock, portMAX_DELAY);
     s_tap_buf = NULL;
     xSemaphoreGive(s_tap_lock);
+    audio_set_capture_slots(VOICE_SLOTS);
     xSemaphoreGive(s_tap_owner);
     return ok ? ESP_OK : ESP_ERR_TIMEOUT;
 }
@@ -510,6 +545,7 @@ esp_err_t voice_start(void)
     esp_timer_create_args_t ptt = {.callback = ptt_timer_cb, .name = "ptt"};
     ESP_ERROR_CHECK(esp_timer_create(&ptt, &s_ptt_timer));
     ESP_ERROR_CHECK(aec_init());
+    ESP_ERROR_CHECK(media_start(on_media));
     // Wake word model: an uploaded one in the `model` partition (POST
     // /wwmodel), else the built-in okay_nabu (see models/).
     extern const uint8_t ww_model_start[] asm("_binary_okay_nabu_tflite_start");
@@ -534,7 +570,9 @@ esp_err_t voice_start(void)
     if (settings_get_str("auto", vol, sizeof(vol)) == ESP_OK) s_auto = vol[0] == '1';
     es8311_set_volume(s_volume);
     link_start();
-    return xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 15, NULL, 1) == pdPASS ? ESP_OK : ESP_FAIL;
+    audio_set_capture_slots(VOICE_SLOTS);
+    // audio_read() resamples, and speexdsp keeps a 4 KB scratch on the stack.
+    return xTaskCreatePinnedToCore(mic_task, "mic", 10240, NULL, 15, NULL, 1) == pdPASS ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t voice_set_server(const char *url, const char *token)

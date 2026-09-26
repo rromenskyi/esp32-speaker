@@ -46,6 +46,15 @@ static SemaphoreHandle_t s_write_lock;  // stream buffers allow only one writer 
 static volatile bool s_playing;         // play task emitted real samples last chunk
 static SpeexResamplerState *s_up;       // 16 -> 48 kHz, mono (voice playback)
 static SpeexResamplerState *s_down;     // 48 -> 16 kHz, 4 interleaved slots (capture)
+static volatile uint32_t s_capture_slots = (1u << SLOTS) - 1;   // see audio_set_capture_slots
+
+// Music: a second, 48 kHz mono stream mixed under the voice. Its gain ramps
+// towards a target (ducking while the assistant listens or talks).
+#define MEDIA_BUF_BYTES (BUS_RATE * 2 * 2)   // 2 s
+static StreamBufferHandle_t s_media;
+static volatile bool s_media_discard;
+static volatile float s_media_target = 1.0f;
+static float s_media_gain = 1.0f;
 
 static void play_task(void *arg)
 {
@@ -66,11 +75,26 @@ static void play_task(void *arg)
         for (size_t i = got; i < PLAY_CHUNK; i++) mono[i] = 0;
         spx_uint32_t in_len = PLAY_CHUNK, out_len = PLAY_CHUNK * RATIO;
         speex_resampler_process_int(s_up, 0, mono, &in_len, up, &out_len);
+        // Mix in music (whatever is buffered; silence otherwise), ramping its
+        // gain by at most ~1 dB per ms so ducking is smooth, not a click.
+        static int16_t music[PLAY_CHUNK * RATIO];
+        static size_t mcarry;   // odd byte kept for the next round, as for voice
+        uint8_t *mb = (uint8_t *)music;
+        size_t mbytes = mcarry + xStreamBufferReceive(s_media, mb + mcarry, out_len * 2 - mcarry, 0);
+        size_t mgot = mbytes / 2;
+        uint8_t modd = mbytes ? mb[mbytes - 1] : 0;
+        const float step = 1.0f / (BUS_RATE / 8);   // full swing in ~125 ms
         memset(frame, 0, sizeof(frame));
         for (size_t i = 0; i < out_len; i++) {
-            frame[SLOTS * i] = up[i];         // left half of the frame -> ES8311 left
-            frame[SLOTS * i + 2] = up[i];     // right half, in case the DAC input is switched
+            float g = s_media_gain, t = s_media_target;
+            s_media_gain = g < t ? (g + step > t ? t : g + step) : (g - step < t ? t : g - step);
+            int32_t v = up[i] + (i < mgot ? (int32_t)(music[i] * s_media_gain) : 0);
+            int16_t o = v > 32767 ? 32767 : v < -32768 ? -32768 : (int16_t)v;
+            frame[SLOTS * i] = o;         // left half of the frame -> ES8311 left
+            frame[SLOTS * i + 2] = o;     // right half, in case the DAC input is switched
         }
+        mcarry = mbytes & 1;
+        if (mcarry) mb[0] = modd;
         carry = n & 1;
         if (carry) bytes[0] = odd;
         size_t written;
@@ -90,6 +114,8 @@ esp_err_t audio_init(uint32_t sample_rate)
     // aren't short (speex otherwise swallows its latency from the first calls).
     speex_resampler_skip_zeros(s_up);
     speex_resampler_skip_zeros(s_down);
+    speex_resampler_set_input_stride(s_down, SLOTS);
+    speex_resampler_set_output_stride(s_down, SLOTS);
 
     i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan.auto_clear = true;
@@ -117,7 +143,13 @@ esp_err_t audio_init(uint32_t sample_rate)
     ESP_RETURN_ON_FALSE(storage, ESP_ERR_NO_MEM, TAG, "play buffer");
     s_play = xStreamBufferCreateStatic(PLAY_BUF_BYTES, 1, storage, &sb);
     s_write_lock = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(play_task, "play", 4096, NULL, 20, NULL, 1);
+    static StaticStreamBuffer_t msb;
+    uint8_t *mstorage = heap_caps_malloc(MEDIA_BUF_BYTES + 1, MALLOC_CAP_SPIRAM);
+    ESP_RETURN_ON_FALSE(mstorage, ESP_ERR_NO_MEM, TAG, "media buffer");
+    s_media = xStreamBufferCreateStatic(MEDIA_BUF_BYTES, 1, mstorage, &msb);
+    // speex_resampler_process_int() keeps a 4 KB scratch on the stack.
+    // Core 0: the mic task (echo canceller) fills core 1 on its own.
+    xTaskCreatePinnedToCore(play_task, "play", 8192, NULL, 20, NULL, 0);
     ESP_LOGI(TAG, "bus %d Hz, voice %lu Hz", BUS_RATE, (unsigned long)sample_rate);
     return ESP_OK;
 }
@@ -150,6 +182,35 @@ void audio_play_flush(void)
     s_discard = false;
 }
 
+// Music writer: one task only (the media player), 48 kHz mono.
+esp_err_t audio_media_write(const int16_t *pcm, size_t samples)
+{
+    const uint8_t *p = (const uint8_t *)pcm;
+    size_t len = samples * 2;
+    while (len && !s_media_discard) {
+        size_t n = xStreamBufferSend(s_media, p, len, pdMS_TO_TICKS(20));
+        p += n;
+        len -= n;
+    }
+    return ESP_OK;
+}
+
+void audio_media_flush(void)
+{
+    s_media_discard = true;
+    for (int i = 0; i < 50 && xStreamBufferReset(s_media) != pdPASS; i++) vTaskDelay(pdMS_TO_TICKS(5));
+    s_media_discard = false;
+}
+
+size_t audio_media_buffered_ms(void)
+{
+    return xStreamBufferBytesAvailable(s_media) / 2 * 1000 / BUS_RATE;
+}
+
+void audio_set_capture_slots(uint32_t mask) { s_capture_slots = mask & ((1u << SLOTS) - 1); }
+
+void audio_set_media_gain(float gain) { s_media_target = gain < 0 ? 0 : gain > 1 ? 1 : gain; }
+
 bool audio_play_idle(void)
 {
     return xStreamBufferIsEmpty(s_play) && !s_playing;
@@ -178,9 +239,17 @@ esp_err_t audio_read(int16_t *frames, size_t frames_count)
         size_t got;
         ESP_RETURN_ON_ERROR(i2s_channel_read(s_rx, bus, want * RATIO * SLOTS * sizeof(int16_t), &got, portMAX_DELAY),
                             TAG, "read");
-        spx_uint32_t in_len = got / (SLOTS * sizeof(int16_t));
-        spx_uint32_t out_len = READ_MAX + 8;
-        speex_resampler_process_interleaved_int(s_down, bus, &in_len, pending, &out_len);
+        // Resample only the slots in use (each costs a filter pass); the
+        // others read as silence.
+        uint32_t mask = s_capture_slots;
+        spx_uint32_t out_len = 0;
+        if (mask != (1u << SLOTS) - 1) memset(pending, 0, sizeof(pending));
+        for (int ch = 0; ch < SLOTS; ch++) {
+            if (!(mask & (1u << ch))) continue;
+            spx_uint32_t il = got / (SLOTS * sizeof(int16_t)), ol = READ_MAX + 8;
+            speex_resampler_process_int(s_down, ch, bus + ch, &il, pending + ch, &ol);
+            out_len = ol;
+        }
         npending = out_len;
     }
     return ESP_OK;
