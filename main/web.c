@@ -10,6 +10,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "lwip/sockets.h"
+#include "library.h"
 #include "ota.h"
 #include "settings.h"
 #include "voice.h"
@@ -27,7 +28,7 @@ static const char PAGE[] =
 "<style>body{font:15px system-ui,sans-serif;max-width:32em;margin:1em auto;padding:0 1em}"
 "input,select,button{font:inherit;width:100%;margin:.3em 0;padding:.4em;box-sizing:border-box}"
 "pre{background:#eee;padding:.6em;white-space:pre-wrap}</style></head><body>"
-"<h2>esp32-speaker</h2><pre id=st>...</pre>"
+"<h2>esp32-speaker</h2><p><a href=/music>Music library</a></p><pre id=st>...</pre>"
 "<h3>Wi-Fi</h3><form method=post action=/wifi>"
 "<select id=nets onchange=\"ssid.value=this.value\"><option>scanning...</option></select>"
 "<input id=ssid name=ssid placeholder=SSID required><input name=pass type=password placeholder=Password>"
@@ -38,7 +39,7 @@ static const char PAGE[] =
 "a.map(n=>`<option>${n.ssid.replace(/</g,'&lt;')}</option>`).join('')});"
 "</script></body></html>";
 
-static bool authorized(httpd_req_t *req)
+bool web_authorized(httpd_req_t *req)
 {
     char want[65], got[65] = "";
     if (settings_get_str("token", want, sizeof(want)) != ESP_OK || !want[0]) return true;
@@ -103,7 +104,7 @@ static bool form_get(const char *body, const char *key, char *out, size_t len)
 
 static esp_err_t h_wifi(httpd_req_t *req)
 {
-    if (!authorized(req)) return ESP_OK;
+    if (!web_authorized(req)) return ESP_OK;
     char body[256];
     int n = req->content_len < sizeof(body) - 1 ? req->content_len : sizeof(body) - 1;
     int got = httpd_req_recv(req, body, n);
@@ -127,7 +128,7 @@ static void reboot_later(void *arg)
 
 static esp_err_t h_ota(httpd_req_t *req)
 {
-    if (!authorized(req)) return ESP_OK;
+    if (!web_authorized(req)) return ESP_OK;
     ota_job_t *job;
     esp_err_t err = ota_job_begin(&job);
     if (err != ESP_OK) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
@@ -155,7 +156,7 @@ static esp_err_t h_ota(httpd_req_t *req)
 // (bypassing the mic), paced at real time. Returns the peak probability.
 static esp_err_t h_wwtest(httpd_req_t *req)
 {
-    if (!authorized(req)) return ESP_OK;
+    if (!web_authorized(req)) return ESP_OK;
     int left = req->content_len;
     if (left <= 0 || left > 16000 * 2 * 15 || (left & 1))
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "1..15 s of pcm16 (even byte count)");
@@ -189,7 +190,7 @@ static esp_err_t h_wwtest(httpd_req_t *req)
 // (as if spoken into the mic); the reply plays on the speaker as usual.
 static esp_err_t h_ask(httpd_req_t *req)
 {
-    if (!authorized(req)) return ESP_OK;
+    if (!web_authorized(req)) return ESP_OK;
     int len = req->content_len;
     if (len <= 0 || len > 16000 * 2 * 15) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "1..15 s of pcm16");
     int16_t *pcm = heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
@@ -220,7 +221,7 @@ static float query_float(httpd_req_t *req, const char *key, float def)
 // built-in model.
 static esp_err_t h_wwmodel(httpd_req_t *req)
 {
-    if (!authorized(req)) return ESP_OK;
+    if (!web_authorized(req)) return ESP_OK;
     char q[160], name[32] = "uploaded";
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) httpd_query_key_value(q, "name", name, sizeof(name));
     wwmodel_writer_t *w;
@@ -249,7 +250,7 @@ static esp_err_t h_wwmodel(httpd_req_t *req)
 
 static esp_err_t h_wwmodel_delete(httpd_req_t *req)
 {
-    if (!authorized(req)) return ESP_OK;
+    if (!web_authorized(req)) return ESP_OK;
     wwmodel_erase();
     httpd_resp_sendstr(req, "OK, rebooting\n");
     xTaskCreate(reboot_later, "reboot", 2048, NULL, 5, NULL);
@@ -258,7 +259,7 @@ static esp_err_t h_wwmodel_delete(httpd_req_t *req)
 
 static esp_err_t h_reboot(httpd_req_t *req)
 {
-    if (!authorized(req)) return ESP_OK;
+    if (!web_authorized(req)) return ESP_OK;
     httpd_resp_sendstr(req, "rebooting\n");
     xTaskCreate(reboot_later, "reboot", 2048, NULL, 5, NULL);
     return ESP_OK;
@@ -303,7 +304,7 @@ esp_err_t web_start(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
     cfg.lru_purge_enable = true;
-    cfg.max_uri_handlers = 16;   // default is 8; registering past it fails silently
+    cfg.max_uri_handlers = 24;   // default is 8; registering past it fails silently
     httpd_handle_t srv;
     esp_err_t err = httpd_start(&srv, &cfg);
     if (err != ESP_OK) return err;
@@ -320,6 +321,7 @@ esp_err_t web_start(void)
         {.uri = "/wwmodel", .method = HTTP_DELETE, .handler = h_wwmodel_delete},
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) httpd_register_uri_handler(srv, &uris[i]);
+    library_register(srv);
     httpd_register_err_handler(srv, HTTPD_404_NOT_FOUND, h_404);
     xTaskCreate(dns_task, "dns", 3072, NULL, 4, NULL);
     return ESP_OK;

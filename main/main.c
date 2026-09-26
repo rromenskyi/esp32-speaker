@@ -5,6 +5,7 @@
 #include "board.h"
 #include "buttons.h"
 #include "leds.h"
+#include "library.h"
 #include "status.h"
 #include "voice.h"
 #include "console.h"
@@ -73,6 +74,7 @@ void app_main(void)
         audio_tone(1320, 150, 6000);
     }
     es7210_init(BOARD_ADDR_ES7210);
+    library_start();   // SD music library (needs the expander); fine without a card
     if (leds_init(BOARD_LED, BOARD_LED_COUNT) == ESP_OK) status_start();
     voice_start();
     buttons_start(voice_on_button);

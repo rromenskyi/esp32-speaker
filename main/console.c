@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include "i2c_bus.h"
 #include "leds.h"
+#include "library.h"
 #include "media.h"
 #include "status.h"
 #include "voice.h"
@@ -304,7 +305,18 @@ static int cmd_music(int argc, char **argv)
     // music <url> [title] | music stop | music pause (toggles)
     if (argc >= 2 && !strcmp(argv[1], "stop")) { media_stop(); return 0; }
     if (argc >= 2 && !strcmp(argv[1], "pause")) { media_pause(media_state() == MEDIA_PLAYING); return 0; }
-    if (argc < 2) { printf("music <http(s) mp3 url> [title] | music stop | music pause\n"); return 1; }
+    if (argc >= 3 && !strcmp(argv[1], "sd")) {
+        // music sd <track name.mp3>: the name may contain spaces.
+        char name[128] = "";
+        for (int i = 2; i < argc; i++) {
+            if (i > 2) strlcat(name, " ", sizeof(name));
+            strlcat(name, argv[i], sizeof(name));
+        }
+        esp_err_t err = library_play(name);
+        if (err != ESP_OK) printf("%s (see http://<device>/music)\n", esp_err_to_name(err));
+        return err == ESP_OK ? 0 : 1;
+    }
+    if (argc < 2) { printf("music <http(s) mp3 url> [title] | music sd <track.mp3> | music stop | music pause\n"); return 1; }
     return media_play(argv[1], argc > 2 ? argv[2] : "") == ESP_OK ? 0 : 1;
 }
 
@@ -376,7 +388,7 @@ void console_start(void)
         {.command = "server", .help = "server [<ws-url> [token] | -]: voice server", .func = cmd_server},
         {.command = "aec",  .help = "aec on|off | aec test [ms] [amp]: echo canceller", .func = cmd_aec},
         {.command = "auto", .help = "auto on|off: wake word mode", .func = cmd_auto},
-        {.command = "music", .help = "music <url> [title] | stop | pause: stream an MP3 (radio, file)", .func = cmd_music},
+        {.command = "music", .help = "music <url> [title] | sd <track.mp3> | stop | pause: play an MP3 (radio, URL, SD card)", .func = cmd_music},
         {.command = "top",  .help = "top [ms]: CPU per task (100 = one core)", .func = cmd_top},
         {.command = "px",   .help = "px <index> <r> <g> <b>: light one pixel only", .func = cmd_px},
     };

@@ -38,6 +38,7 @@ ota_1    app  ota_1   0x700000 6M
 | I2S DIN (from ES7210, mic array) | 15 | ✅ |
 | BOOT button (4th button on the case) | 0 | ✅ |
 | Case LEDs, WS2812 data | 38 | ✅ |
+| microSD CLK / CMD / D0 (SDMMC 1-bit) | 40 / 42 / 41 | |
 
 There is no display on this board.
 
@@ -54,10 +55,19 @@ There is no display on this board.
 
 | Pin | Function | |
 |-----|----------|---|
+| P03 (EXIO3) | microSD D3/CD, pulled up; driven high before mounting | |
 | P10 (EXIO8) | speaker power amplifier enable, active high | ✅ |
 | P11 / P12 / P13 | buttons k1 / k2 / k3, active low | ✅ |
 
 At boot all inputs read high except P05.
+
+### microSD slot
+
+SDMMC in 1-bit mode only: D1 and D2 reach just their pull-ups, and D3 sits on
+the IO expander (so neither 4-bit nor SPI mode is practical). All six lines
+have 10 kΩ pull-ups; there is no card detect (R26 not fitted) and no power
+switch. Pins from the Waveshare ESP32-S3-AUDIO-Board schematic (v1.1) and its
+demo code; the firmware keeps the music library in `/sdcard/music`.
 
 ### Buttons and switches
 

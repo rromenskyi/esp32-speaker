@@ -19,6 +19,7 @@ static const char *TAG = "media";
 #define READ_CHUNK  4096
 
 static media_cb_t s_cb;
+static media_next_t s_next;
 static SemaphoreHandle_t s_lock;
 static TaskHandle_t s_task;
 static char s_url[512], s_title[96];
@@ -33,9 +34,13 @@ static void notify(const char *state, const char *detail)
     if (s_cb) s_cb(state, detail);
 }
 
-// Decode one stream until it ends, fails or is stopped/replaced.
-static void play_stream(const char *url)
+// Decode one stream until it ends, fails or is stopped/replaced. `url` is an
+// http(s) URL or a file path (the SD card's music, "/sdcard/...").
+// Returns true when the stream ended by itself (not stopped, replaced or failed).
+static bool play_stream(const char *url)
 {
+    bool is_file = url[0] == '/';
+    FILE *file = NULL;
     esp_http_client_config_t cfg = {
         .url = url,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -44,7 +49,7 @@ static void play_stream(const char *url)
         .user_agent = "esp32-speaker",
         .max_redirection_count = 5,
     };
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    esp_http_client_handle_t c = is_file ? NULL : esp_http_client_init(&cfg);
     uint8_t *in = heap_caps_malloc(IN_BUF, MALLOC_CAP_SPIRAM);
     int16_t *pcm = heap_caps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     int16_t *mono = heap_caps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME / 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
@@ -55,12 +60,16 @@ static void play_stream(const char *url)
     const char *failure = NULL;
     bool started = false;
 
-    if (!c || !in || !pcm || !mono || !out || !dec) { failure = "out of memory"; goto done; }
+    if ((!is_file && !c) || !in || !pcm || !mono || !out || !dec) { failure = "out of memory"; goto done; }
     mp3dec_init(dec);
-    if (esp_http_client_open(c, 0) != ESP_OK) { failure = "connect failed"; goto done; }
-    esp_http_client_fetch_headers(c);
-    int status = esp_http_client_get_status_code(c);
-    if (status != 200) { failure = "HTTP error"; ESP_LOGW(TAG, "HTTP %d for %s", status, url); goto done; }
+    if (is_file) {
+        if (!(file = fopen(url, "rb"))) { failure = "file not found"; goto done; }
+    } else {
+        if (esp_http_client_open(c, 0) != ESP_OK) { failure = "connect failed"; goto done; }
+        esp_http_client_fetch_headers(c);
+        int status = esp_http_client_get_status_code(c);
+        if (status != 200) { failure = "HTTP error"; ESP_LOGW(TAG, "HTTP %d for %s", status, url); goto done; }
+    }
 
     size_t have = 0;
     bool eof = false;
@@ -72,7 +81,11 @@ static void play_stream(const char *url)
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
-        if (!eof && have < IN_BUF - READ_CHUNK) {
+        if (!eof && have < IN_BUF - READ_CHUNK && file) {
+            size_t n = fread(in + have, 1, READ_CHUNK, file);
+            if (n == 0) eof = true;
+            have += n;
+        } else if (!eof && have < IN_BUF - READ_CHUNK) {
             int n = esp_http_client_read(c, (char *)in + have, READ_CHUNK);
             if (n < 0) { failure = "stream read failed"; break; }
             if (n == 0) {
@@ -119,6 +132,7 @@ static void play_stream(const char *url)
     }
 done:
     if (c) { esp_http_client_close(c); esp_http_client_cleanup(c); }
+    if (file) fclose(file);
     if (rs) speex_resampler_destroy(rs);
     free(in); free(pcm); free(mono); free(out); free(dec);
     if (s_stop || s_request) {
@@ -130,6 +144,7 @@ done:
         notify("ended", s_title);
     }
     if (!s_request) s_state = MEDIA_STOPPED;
+    return !s_stop && !s_request && !failure;
 }
 
 static void media_task(void *arg)
@@ -145,7 +160,17 @@ static void media_task(void *arg)
             s_paused = false;
             xSemaphoreGive(s_lock);
             ESP_LOGI(TAG, "play %s", url);
-            play_stream(url);
+            if (play_stream(url) && s_next) {
+                // Ended on its own: ask the library for what comes next.
+                char next[sizeof(s_url)], title[sizeof(s_title)];
+                xSemaphoreTake(s_lock, portMAX_DELAY);
+                if (!s_request && s_next(url, next, sizeof(next), title, sizeof(title))) {
+                    strlcpy(s_url, next, sizeof(s_url));
+                    strlcpy(s_title, title, sizeof(s_title));
+                    s_request = true;
+                }
+                xSemaphoreGive(s_lock);
+            }
         }
     }
 }
@@ -160,7 +185,7 @@ esp_err_t media_start(media_cb_t cb)
 
 esp_err_t media_play(const char *url, const char *title)
 {
-    if (!url || strncmp(url, "http", 4)) return ESP_ERR_INVALID_ARG;
+    if (!url || (strncmp(url, "http", 4) && strncmp(url, "/sdcard/", 8))) return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     strlcpy(s_url, url, sizeof(s_url));
     strlcpy(s_title, title ? title : "", sizeof(s_title));
@@ -186,3 +211,5 @@ void media_pause(bool paused)
 }
 
 media_state_t media_state(void) { return s_state; }
+
+void media_set_next(media_next_t next) { s_next = next; }
