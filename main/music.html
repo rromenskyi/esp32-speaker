@@ -88,7 +88,7 @@ async function load(){
   $('state').textContent=playing?D.state:'stopped';
   $('pp').textContent=D.state=='playing'?'⏸':'▶';
   if(!dragging){$('vol').value=D.volume;$('volv').textContent=D.volume}
-  $('card').textContent=D.card?`SD card: ${mb(D.free)} free of ${mb(D.total)}`:'No SD card';
+  $('card').textContent=D.card?`SD card: ${mb(D.free)} free of ${mb(D.total)}`:'No SD card ('+D.card_error+')';
   $('cbar').style.width=D.card?(100-D.free/D.total*100)+'%':0;
   const t=D.tracks.sort((a,b)=>a.name.localeCompare(b.name));
   $('empty').hidden=t.length>0;

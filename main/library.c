@@ -9,6 +9,7 @@
 #include "driver/sdmmc_host.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "media.h"
 #include "sdmmc_cmd.h"
@@ -27,6 +28,16 @@ static const char *TAG = "library";
 static sdmmc_card_t *s_card;
 static SemaphoreHandle_t s_lock;        // mount/format vs. file operations
 static char s_current[NAME_MAX_BYTES + 1];   // library track playing (for "next")
+static esp_err_t mount(bool format_if_needed);
+static esp_err_t s_mount_err = ESP_ERR_NOT_FOUND;
+static int64_t s_mount_at;                  // ms; last mount attempt
+
+// No card yet: try again, at most every 10 s (a card inserted or recovered
+// after boot shows up on the next page load). Call with s_lock held.
+static void ensure_mounted(void)
+{
+    if (!s_card && esp_timer_get_time() / 1000 - s_mount_at > 10000) mount(false);
+}
 
 // --- card -------------------------------------------------------------------
 
@@ -63,9 +74,18 @@ static esp_err_t mount(bool format_if_needed)
     slot.cmd = BOARD_SD_CMD;
     slot.d0 = BOARD_SD_D0;
     slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-    esp_err_t err = esp_vfs_fat_sdmmc_mount(MOUNT, &host, &slot, &mc, &s_card);
-    if (err != ESP_OK) {
+    // The card has no power switch, so a reboot in the middle of a read can
+    // leave it busy; it usually answers on a second or third try.
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt) vTaskDelay(pdMS_TO_TICKS(250));
+        err = esp_vfs_fat_sdmmc_mount(MOUNT, &host, &slot, &mc, &s_card);
+        if (err == ESP_OK) break;
         s_card = NULL;
+    }
+    s_mount_err = err;
+    s_mount_at = esp_timer_get_time() / 1000;
+    if (err != ESP_OK) {
         ESP_LOGW(TAG, "no SD card (%s)", esp_err_to_name(err));
         return err;
     }
@@ -100,7 +120,11 @@ static void title_of(char *out, size_t len, const char *name)
 
 esp_err_t library_play(const char *name)
 {
-    if (!s_card || !name_ok(name)) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    ensure_mounted();
+    xSemaphoreGive(s_lock);
+    if (!s_card) return ESP_ERR_NOT_FOUND;
+    if (!name_ok(name)) return ESP_ERR_INVALID_ARG;
     char path[sizeof(MUSIC_DIR) + NAME_MAX_BYTES + 2], title[NAME_MAX_BYTES + 1];
     track_path(path, sizeof(path), name);
     struct stat st;
@@ -174,10 +198,11 @@ static esp_err_t h_list(httpd_req_t *req)
     char buf[NAME_MAX_BYTES + 96];
     static const char *const states[] = {"stopped", "playing", "paused"};
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    ensure_mounted();
     uint64_t total = 0, free_b = 0;
     if (s_card) esp_vfs_fat_info(MOUNT, &total, &free_b);
-    snprintf(buf, sizeof(buf), "{\"card\":%s,\"total\":%llu,\"free\":%llu,\"volume\":%d,\"state\":\"%s\",\"current\":\"%s\",\"tracks\":[",
-             s_card ? "true" : "false", (unsigned long long)total, (unsigned long long)free_b, voice_volume(),
+    snprintf(buf, sizeof(buf), "{\"card\":%s,\"card_error\":\"%s\",\"total\":%llu,\"free\":%llu,\"volume\":%d,\"state\":\"%s\",\"current\":\"%s\",\"tracks\":[",
+             s_card ? "true" : "false", s_card ? "" : esp_err_to_name(s_mount_err), (unsigned long long)total, (unsigned long long)free_b, voice_volume(),
              states[media_state()], media_state() != MEDIA_STOPPED ? s_current : "");
     httpd_resp_sendstr_chunk(req, buf);
     DIR *d = s_card ? opendir(MUSIC_DIR) : NULL;
