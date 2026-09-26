@@ -59,6 +59,12 @@ pressure when its buffer is full.
 // Raw button events the device doesn't consume itself (k1 is push-to-talk and
 // k2/k3 are volume -/+, handled locally; the others are forwarded).
 {"type": "button", "name": "k2", "action": "press"}   // press | release
+
+// Music player state changes (see "Music" below). `title` echoes the play
+// request; `message` explains an error.
+{"type": "media", "state": "playing", "title": "Radio Paradise"}
+{"type": "media", "state": "paused"}     // also: "stopped" (by request), "ended" (stream over)
+{"type": "media", "state": "error", "message": "HTTP error"}
 ```
 
 ### server → device
@@ -85,6 +91,10 @@ pressure when its buffer is full.
 // Device settings.
 {"type": "set", "volume": 70}
 
+// Music player (see "Music" below). A new `play` replaces what is playing.
+{"type": "media", "action": "play", "url": "http://host/track.mp3", "title": "Track"}
+{"type": "media", "action": "pause"}    // also: "resume", "stop"
+
 // Something went wrong; `message` is for logs. The device shows an error
 // pattern briefly and returns to idle.
 {"type": "error", "message": "stt failed"}
@@ -110,6 +120,19 @@ device                                   server
 While speaking, the device keeps listening for an interruption (button press
 now; wake word once echo cancellation lands). On interruption it stops
 playback, flushes its buffer and sends `abort`.
+
+## Music
+
+The device streams MP3 itself: the server sends only a URL (`http` or
+`https`; internet radio, a file from a media library, any MP3 stream). MPEG-1/2
+layer III, mono or stereo (played mono), any sample rate. Other formats (AAC,
+Ogg) must be transcoded to MP3 by the server.
+
+Music plays under the voice path: muted while the device listens (so it
+doesn't reach speech recognition), ducked to about -18 dB while the server
+thinks and speaks, full level otherwise. A k1 tap while idle pauses or
+resumes it; the device reports each change with a `media` message. The
+volume buttons and `set` volume apply to music and speech together.
 
 ## Device states and LEDs
 
