@@ -58,6 +58,22 @@ static float s_media_gain = 1.0f;
 
 // Light show input: RMS of the music per band over each play chunk (~16 ms),
 // after the ducking gain, split by two one-pole filters (~150 Hz, ~2.5 kHz).
+// Diagnostics (see audio_stats): TX DMA refills that came too late, and voice
+// chunks that ran dry mid-stream (partly filled after real samples).
+static volatile uint32_t s_tx_late, s_voice_gaps;
+
+static bool IRAM_ATTR on_tx_late(i2s_chan_handle_t h, i2s_event_data_t *e, void *ctx)
+{
+    s_tx_late++;
+    return false;
+}
+
+void audio_stats(uint32_t *tx_late, uint32_t *voice_gaps)
+{
+    *tx_late = s_tx_late;
+    *voice_gaps = s_voice_gaps;
+}
+
 static volatile float s_band[3];   // bass, mid, treble; 0..1 of full scale
 
 static void media_meter(const int16_t *pcm, size_t n)
@@ -95,6 +111,7 @@ static void play_task(void *arg)
         // the odd byte for the next round so samples never shift.
         size_t n = carry + xStreamBufferReceive(s_play, bytes + carry, sizeof(mono) - carry, pdMS_TO_TICKS(5));
         size_t got = n / 2;
+        if (s_playing && got < PLAY_CHUNK) s_voice_gaps++;   // also counts each stream's end
         s_playing = got > 0;
         uint8_t odd = bytes[n > 0 ? n - 1 : 0];
         // Always run a full chunk (silence-padded) through the upsampler so
@@ -163,6 +180,8 @@ esp_err_t audio_init(uint32_t sample_rate)
     };
     ESP_RETURN_ON_ERROR(i2s_channel_init_tdm_mode(s_tx, &tdm), TAG, "tx init");
     ESP_RETURN_ON_ERROR(i2s_channel_init_tdm_mode(s_rx, &tdm), TAG, "rx init");
+    i2s_event_callbacks_t cbs = {.on_send_q_ovf = on_tx_late};
+    ESP_RETURN_ON_ERROR(i2s_channel_register_event_callback(s_tx, &cbs, NULL), TAG, "tx callbacks");
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx), TAG, "tx enable");
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_rx), TAG, "rx enable");
 

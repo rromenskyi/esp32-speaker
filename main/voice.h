@@ -11,6 +11,8 @@ esp_err_t voice_start(void);
 esp_err_t voice_set_server(const char *url, const char *token);
 void voice_on_button(button_t b, bool pressed);
 void voice_set_auto(bool on);   // wake word mode
+void voice_set_volume(int volume);   // 0..100, saved (as the k2/k3 buttons)
+int voice_volume(void);
 // Send pcm (16 kHz mono) as if spoken into the mic, then play the reply as usual.
 esp_err_t voice_ask_injected(const int16_t *pcm, size_t samples);
 void voice_describe(char *out, size_t len);

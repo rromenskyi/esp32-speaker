@@ -13,6 +13,7 @@
 #include "media.h"
 #include "sdmmc_cmd.h"
 #include "tca9555.h"
+#include "voice.h"
 #include "web.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -175,8 +176,8 @@ static esp_err_t h_list(httpd_req_t *req)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     uint64_t total = 0, free_b = 0;
     if (s_card) esp_vfs_fat_info(MOUNT, &total, &free_b);
-    snprintf(buf, sizeof(buf), "{\"card\":%s,\"total\":%llu,\"free\":%llu,\"state\":\"%s\",\"current\":\"%s\",\"tracks\":[",
-             s_card ? "true" : "false", (unsigned long long)total, (unsigned long long)free_b,
+    snprintf(buf, sizeof(buf), "{\"card\":%s,\"total\":%llu,\"free\":%llu,\"volume\":%d,\"state\":\"%s\",\"current\":\"%s\",\"tracks\":[",
+             s_card ? "true" : "false", (unsigned long long)total, (unsigned long long)free_b, voice_volume(),
              states[media_state()], media_state() != MEDIA_STOPPED ? s_current : "");
     httpd_resp_sendstr_chunk(req, buf);
     DIR *d = s_card ? opendir(MUSIC_DIR) : NULL;
@@ -274,7 +275,12 @@ static esp_err_t h_control(httpd_req_t *req)
     const char *action = req->uri + strlen("/music/");
     if (!strncmp(action, "stop", 4)) media_stop();
     else if (!strncmp(action, "pause", 5)) media_pause(media_state() == MEDIA_PLAYING);
-    else if (!strncmp(action, "next", 4)) {
+    else if (!strncmp(action, "volume", 6)) {
+        char q[24], v[8];
+        if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK || httpd_query_key_value(q, "v", v, sizeof(v)) != ESP_OK)
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "?v=0..100");
+        voice_set_volume(atoi(v));
+    } else if (!strncmp(action, "next", 4)) {
         char url[sizeof(MUSIC_DIR) + NAME_MAX_BYTES + 2], title[NAME_MAX_BYTES + 1], cur[sizeof(url)];
         snprintf(cur, sizeof(cur), MUSIC_DIR "/%s", s_current);
         if (next_track(cur, url, sizeof(url), title, sizeof(title))) media_play(url, title);
@@ -300,54 +306,14 @@ static esp_err_t h_format(httpd_req_t *req)
     return err == ESP_OK ? send_json(req, "{\"ok\":true}") : httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
 }
 
-static const char PAGE[] =
-"<!doctype html><html><head><meta charset=utf-8>"
-"<meta name=viewport content='width=device-width,initial-scale=1'><title>Music</title>"
-"<style>body{font:15px system-ui,sans-serif;max-width:36em;margin:1em auto;padding:0 1em}"
-"button{font:inherit;padding:.35em .8em;margin:.15em}table{width:100%;border-collapse:collapse}"
-"td{padding:.35em .2em;border-bottom:1px solid #ddd}td.n{word-break:break-word}.cur{font-weight:600}"
-"#bar{height:6px;background:#4a8;width:0}#drop{border:2px dashed #aaa;padding:1.2em;text-align:center;margin:.8em 0}"
-"small{color:#666}</style></head><body>"
-"<h2>Music</h2><p id=card>...</p>"
-"<p><button onclick=\"act('pause')\">⏯ Pause</button><button onclick=\"act('stop')\">⏹ Stop</button>"
-"<button onclick=\"act('next')\">⏭ Next</button></p>"
-"<table id=list></table>"
-"<div id=drop>Drop MP3 files here or <input type=file id=pick accept='.mp3,audio/mpeg' multiple>"
-"<div id=up></div><div id=bar></div></div>"
-"<p><small>Radio / URL:</small><br><input id=url placeholder='http://...' style='width:70%'>"
-"<button onclick=\"post('/music/play?url='+encodeURIComponent(url.value))\">Play</button></p>"
-"<p><small><a href=/>device</a> · <a href=# onclick=\"fmt();return false\">format card</a></small></p>"
-"<script>"
-"const H=()=>{const t=localStorage.tok;return t?{'X-Token':t}:{}};"
-"async function post(u){let r=await fetch(u,{method:'POST',headers:H()});"
-"if(r.status==401){localStorage.tok=prompt('Device token')||'';r=await fetch(u,{method:'POST',headers:H()})}"
-"if(!r.ok)alert(await r.text());load()}"
-"const act=a=>post('/music/'+a);"
-"const mb=b=>(b/1048576).toFixed(1)+' MB';"
-"async function load(){const d=await(await fetch('/music/list')).json();"
-"card.textContent=d.card?`SD: ${mb(d.free)} free of ${mb(d.total)} · ${d.state}${d.current?': '+d.current:''}`:'No SD card';"
-"list.innerHTML=d.tracks.sort((a,b)=>a.name.localeCompare(b.name)).map(t=>{const n=encodeURIComponent(t.name);"
-"return `<tr><td class='n${t.name==d.current?' cur':''}'>${t.name}<br><small>${mb(t.size)}</small></td>"
-"<td><button onclick=\"post('/music/play?name=${n}')\">▶</button>"
-"<button onclick=\"confirm('Delete ${t.name}?')&&post('/music/delete?name=${n}')\">🗑</button></td></tr>`}).join('')}"
-"const Q=[];let busy=false;"
-"function send(files){Q.push(...files);if(!busy)next()}"
-"function next(){const f=Q.shift();if(!f){busy=false;up.textContent='';bar.style.width=0;load();return}"
-"busy=true;const x=new XMLHttpRequest();up.textContent='Uploading '+f.name+(Q.length?` (${Q.length} more queued)`:'');"
-"bar.style.width=0;x.open('POST','/music/upload?name='+encodeURIComponent(f.name));const t=localStorage.tok;if(t)x.setRequestHeader('X-Token',t);"
-"x.upload.onprogress=e=>bar.style.width=(e.loaded/e.total*100)+'%';"
-"x.onload=()=>{if(x.status!=200)alert(f.name+': '+x.responseText);load();next()};"
-"x.onerror=()=>{alert(f.name+': upload error');next()};x.send(f)}"
-"pick.onchange=()=>{send([...pick.files]);pick.value=''};"
-"drop.ondragover=e=>e.preventDefault();drop.ondrop=e=>{e.preventDefault();send([...e.dataTransfer.files])};"
-"function fmt(){if(prompt('Erase EVERYTHING on the SD card? Type yes')=='yes')post('/music/format?confirm=yes')}"
-"load();setInterval(load,5000);"
-"</script></body></html>";
+// The page is main/music.html, embedded at build time.
+extern const char music_html_start[] asm("_binary_music_html_start");
+extern const char music_html_end[] asm("_binary_music_html_end");
 
 static esp_err_t h_page(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, PAGE, sizeof(PAGE) - 1);
+    return httpd_resp_send(req, music_html_start, music_html_end - music_html_start);
 }
 
 void library_register(httpd_handle_t srv)
@@ -363,6 +329,7 @@ void library_register(httpd_handle_t srv)
         {.uri = "/music/stop", .method = HTTP_POST, .handler = h_control},
         {.uri = "/music/pause", .method = HTTP_POST, .handler = h_control},
         {.uri = "/music/next", .method = HTTP_POST, .handler = h_control},
+        {.uri = "/music/volume", .method = HTTP_POST, .handler = h_control},
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) httpd_register_uri_handler(srv, &uris[i]);
 }

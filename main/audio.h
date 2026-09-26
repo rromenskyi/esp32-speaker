@@ -19,7 +19,10 @@ void audio_media_flush(void);
 size_t audio_media_buffered_ms(void);
 void audio_set_media_gain(float gain);  // 0..1, ramped (ducking)
 void audio_media_levels(float out[3]);  // music RMS now: bass, mid, treble (0..1)
-bool audio_play_idle(void);             // queue empty and the last chunk played
+bool audio_play_idle(void);
+// Counters since boot: TX DMA refills that came too late (CPU starvation of
+// the play task), and voice chunks that ran dry mid-stream (data too slow).
+void audio_stats(uint32_t *tx_late, uint32_t *voice_gaps);             // queue empty and the last chunk played
 // Which capture slots audio_read() fills (bit n = slot n; default all). The
 // rest read as zeros: resampling costs CPU per slot. A slot switched back on
 // replays a few ms of stale filter state.

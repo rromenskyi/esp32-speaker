@@ -1,0 +1,123 @@
+<!doctype html>
+<html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Music</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--text:#1d2129;--mute:#6b7280;--line:#e5e7eb;--acc:#10b981;--acc2:#0ea5e9;--bad:#ef4444}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b22;--text:#e8eaed;--mute:#9aa0aa;--line:#262a33}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 system-ui,-apple-system,sans-serif}
+main{max-width:34rem;margin:0 auto;padding:16px}
+.card{background:var(--card);border-radius:16px;padding:16px;margin-bottom:14px;box-shadow:0 1px 3px #0001}
+h1{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:0 0 6px}
+#title{font-size:21px;font-weight:650;min-height:1.4em;word-break:break-word}
+#state{color:var(--mute);font-size:13px}
+.ctl{display:flex;gap:10px;align-items:center;margin:14px 0 4px}
+.ctl button{width:48px;height:48px;border-radius:50%;border:0;background:var(--line);color:var(--text);font-size:19px;cursor:pointer}
+.ctl button.main{width:58px;height:58px;background:var(--acc);color:#fff;font-size:22px}
+.vol{display:flex;align-items:center;gap:10px;margin-top:10px;color:var(--mute)}
+input[type=range]{flex:1;accent-color:var(--acc)}
+#volv{width:2.5em;text-align:right;font-variant-numeric:tabular-nums}
+.row{display:flex;align-items:center;gap:10px;padding:9px 4px;border-bottom:1px solid var(--line)}
+.row:last-child{border:0}
+.row .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.row .s{color:var(--mute);font-size:12px;font-variant-numeric:tabular-nums}
+.row.cur .n{color:var(--acc);font-weight:600}
+.row button{border:0;background:none;color:var(--mute);font-size:16px;cursor:pointer;padding:4px 6px;border-radius:8px}
+.row button:hover{background:var(--line);color:var(--bad)}
+.play{width:30px;height:30px;border-radius:50%;border:0;background:var(--line);color:var(--text);cursor:pointer;flex:none}
+.row.cur .play{background:var(--acc);color:#fff}
+#empty{color:var(--mute);text-align:center;padding:14px 0}
+#drop{border:2px dashed var(--line);border-radius:12px;padding:16px;text-align:center;color:var(--mute);cursor:pointer}
+#drop.over{border-color:var(--acc);color:var(--acc)}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:10px}
+.bar i{display:block;height:100%;width:0;background:var(--acc2);transition:width .2s}
+#up{font-size:13px;margin-top:8px;min-height:1.2em}
+.url{display:flex;gap:8px}
+.url input{flex:1;min-width:0;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
+.url button{padding:0 16px;border-radius:10px;border:0;background:var(--acc2);color:#fff;font:inherit;cursor:pointer}
+footer{color:var(--mute);font-size:12px;text-align:center}
+footer a{color:inherit}
+</style></head><body><main>
+
+<section class=card>
+  <h1>Now playing</h1>
+  <div id=title>—</div><div id=state>&nbsp;</div>
+  <div class=ctl>
+    <button class=main id=pp title="Play / pause">▶</button>
+    <button onclick="act('next')" title=Next>⏭</button>
+    <button onclick="act('stop')" title=Stop>⏹</button>
+  </div>
+  <div class=vol>🔈<input type=range id=vol min=0 max=100 step=5><span id=volv></span></div>
+</section>
+
+<section class=card>
+  <h1>Library</h1>
+  <div id=list></div>
+  <div id=empty hidden>No tracks yet — drop MP3 files below.</div>
+</section>
+
+<section class=card>
+  <div id=drop>Drop MP3 files here or tap to choose<input type=file id=pick accept=".mp3,audio/mpeg" multiple hidden></div>
+  <div id=up></div><div class=bar><i id=ubar></i></div>
+</section>
+
+<section class=card>
+  <h1>Radio / link</h1>
+  <div class=url><input id=url placeholder="http://… MP3 stream"><button onclick="post('/music/play?url='+encodeURIComponent(url.value))">Play</button></div>
+</section>
+
+<footer><span id=card></span><div class=bar><i id=cbar style="background:var(--mute)"></i></div>
+<p><a href=/>device</a> · <a href=# id=fmt>format card</a></p></footer>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const H=()=>{const t=localStorage.tok;return t?{'X-Token':t}:{}};
+const mb=b=>b>=1073741824?(b/1073741824).toFixed(1)+' GB':(b/1048576).toFixed(1)+' MB';
+const esc=s=>s.replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+let D={tracks:[]},dragging=false;
+async function post(u){let r=await fetch(u,{method:'POST',headers:H()});
+  if(r.status==401){localStorage.tok=prompt('Device token')||'';r=await fetch(u,{method:'POST',headers:H()})}
+  if(!r.ok)alert(await r.text());setTimeout(load,300)}
+const act=a=>post('/music/'+a);
+const play=n=>post('/music/play?name='+encodeURIComponent(n));
+async function load(){
+  try{D=await(await fetch('/music/list')).json()}catch(e){$('state').textContent='device offline';return}
+  const playing=D.state!='stopped';
+  $('title').textContent=playing?(D.current||'stream').replace(/\.mp3$/i,''):'—';
+  $('state').textContent=playing?D.state:'stopped';
+  $('pp').textContent=D.state=='playing'?'⏸':'▶';
+  if(!dragging){$('vol').value=D.volume;$('volv').textContent=D.volume}
+  $('card').textContent=D.card?`SD card: ${mb(D.free)} free of ${mb(D.total)}`:'No SD card';
+  $('cbar').style.width=D.card?(100-D.free/D.total*100)+'%':0;
+  const t=D.tracks.sort((a,b)=>a.name.localeCompare(b.name));
+  $('empty').hidden=t.length>0;
+  $('list').innerHTML=t.map((x,i)=>`<div class="row${x.name==D.current&&playing?' cur':''}">`+
+    `<button class=play data-i=${i}>${x.name==D.current&&D.state=='playing'?'♪':'▶'}</button>`+
+    `<span class=n data-i=${i} title="${esc(x.name)}">${esc(x.name.replace(/\.mp3$/i,''))}</span>`+
+    `<span class=s>${mb(x.size)}</span><button class=del data-i=${i} title=Delete>✕</button></div>`).join('');
+}
+$('list').onclick=e=>{const i=e.target.dataset.i;if(i===undefined)return;const n=D.tracks[i].name;
+  if(e.target.classList.contains('del')){if(confirm('Delete '+n+'?'))post('/music/delete?name='+encodeURIComponent(n))}else play(n)};
+$('pp').onclick=()=>{if(D.state!='stopped')act('pause');else if(D.tracks.length)play(D.tracks[0].name)};
+const vol=$('vol');
+vol.oninput=()=>{dragging=true;$('volv').textContent=vol.value};
+vol.onchange=()=>{dragging=false;post('/music/volume?v='+vol.value)};
+// Uploads: one at a time from a queue, whatever order files are dropped in.
+const Q=[];let busy=false;
+function send(f){Q.push(...f);if(!busy)next()}
+function next(){const f=Q.shift();if(!f){busy=false;$('up').textContent='';$('ubar').style.width=0;load();return}
+  busy=true;$('up').textContent='Uploading '+f.name+(Q.length?` · ${Q.length} more queued`:'');$('ubar').style.width=0;
+  const x=new XMLHttpRequest();x.open('POST','/music/upload?name='+encodeURIComponent(f.name));
+  if(localStorage.tok)x.setRequestHeader('X-Token',localStorage.tok);
+  x.upload.onprogress=e=>$('ubar').style.width=(e.loaded/e.total*100)+'%';
+  x.onload=()=>{if(x.status!=200)alert(f.name+': '+x.responseText);load();next()};
+  x.onerror=()=>{alert(f.name+': upload failed');next()};x.send(f)}
+const drop=$('drop'),pick=$('pick');
+drop.onclick=()=>pick.click();pick.onchange=()=>{send([...pick.files]);pick.value=''};
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};
+drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');send([...e.dataTransfer.files])};
+$('fmt').onclick=e=>{e.preventDefault();if(prompt('Erase EVERYTHING on the SD card? Type yes')=='yes')post('/music/format?confirm=yes')};
+load();setInterval(()=>{if(!busy)load()},3000);
+</script></body></html>

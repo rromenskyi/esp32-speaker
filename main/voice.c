@@ -201,6 +201,9 @@ static void on_media(const char *state, const char *detail)
     cJSON_Delete(m);
 }
 
+void voice_set_volume(int volume) { set_volume(volume, false); }
+int voice_volume(void) { return s_volume; }
+
 void voice_set_auto(bool on)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -499,6 +502,10 @@ static void mic_task(void *arg)
         else if (s_state == ST_THINKING && in_state > THINK_TIMEOUT_MS) set_state(ST_IDLE);
         else if (s_state == ST_SPEAKING && s_speak_stopped && audio_play_idle()) {
             send_json("{\"type\":\"speak\",\"state\":\"done\"}");
+            uint32_t late, gaps;
+            audio_stats(&late, &gaps);
+            ESP_LOGI(TAG, "speak done (audio since boot: %lu late DMA refills, %lu voice gaps)",
+                     (unsigned long)late, (unsigned long)gaps);
             set_state(ST_IDLE);
         }
         xSemaphoreGive(s_lock);

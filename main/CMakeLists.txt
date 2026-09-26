@@ -4,4 +4,4 @@ idf_component_register(SRCS "main.c" "i2c_bus.c" "tca9555.c" "es8311.c" "es7210.
                        REQUIRES esp_psram spi_flash app_update esp_system esp_driver_i2c
                                 esp_driver_i2s esp_driver_sdmmc sdmmc fatfs esp_driver_usb_serial_jtag esp_driver_gpio esp_driver_rmt console nvs_flash esp_wifi
                                 esp_netif esp_event esp_http_server esp_timer esp_partition lwip speexdsp minimp3 esp_http_client mbedtls microfrontend esp-tflite-micro
-                       EMBED_FILES "../models/okay_nabu.tflite")
+                       EMBED_FILES "../models/okay_nabu.tflite" "music.html")
