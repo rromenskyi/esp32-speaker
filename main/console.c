@@ -12,6 +12,10 @@
 #include "board.h"
 #include "es8311.h"
 #include "esp_console.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#include "linenoise/linenoise.h"
+#include <fcntl.h>
 #include "i2c_bus.h"
 #include "leds.h"
 #include "media.h"
@@ -313,13 +317,43 @@ static int cmd_px(int argc, char **argv)
     return leds_show() == ESP_OK ? 0 : 1;
 }
 
+// Own REPL loop instead of esp_console_start_repl(): that one retries at once
+// when linenoise() returns NULL, and with no USB host attached stdin keeps
+// failing, so it spun at ~80% of a core. Here a failed read backs off.
+static void repl_task(void *arg)
+{
+    setvbuf(stdin, NULL, _IONBF, 0);
+    linenoiseSetDumbMode(1);   // plain line input; works with any terminal and script
+    linenoiseHistorySetMaxLen(20);
+    for (;;) {
+        char *line = linenoise("spk> ");
+        if (!line) {
+            clearerr(stdin);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        if (line[0]) {
+            linenoiseHistoryAdd(line);
+            int ret;
+            esp_err_t err = esp_console_run(line, &ret);
+            if (err == ESP_ERR_NOT_FOUND) printf("unknown command\n");
+            else if (err == ESP_OK && ret) printf("error %d\n", ret);
+        }
+        linenoiseFree(line);
+    }
+}
+
 void console_start(void)
 {
-    esp_console_repl_t *repl;
-    esp_console_repl_config_t rc = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
-    rc.prompt = "spk>";
-    esp_console_dev_usb_serial_jtag_config_t hw = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw, &rc, &repl));
+    usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+    usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
+    fcntl(fileno(stdout), F_SETFL, 0);
+    fcntl(fileno(stdin), F_SETFL, 0);
+    usb_serial_jtag_driver_config_t usj = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usj));
+    usb_serial_jtag_vfs_use_driver();
+    esp_console_config_t cc = ESP_CONSOLE_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_console_init(&cc));
 
     const esp_console_cmd_t cmds[] = {
         {.command = "scan", .help = "scan the I2C bus", .func = cmd_scan},
@@ -349,5 +383,5 @@ void console_start(void)
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
     esp_console_register_help_command();
-    ESP_ERROR_CHECK(esp_console_start_repl(repl));
+    xTaskCreate(repl_task, "console", 4096, NULL, 2, NULL);
 }
