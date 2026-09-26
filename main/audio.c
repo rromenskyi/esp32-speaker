@@ -2,12 +2,20 @@
 // (Philips framing) because they share BCLK/WS: the ES7210 needs 4 slots per
 // frame, and the ES8311 (I2S slave, auto-detecting the clock ratio) simply takes
 // the left channel, i.e. slot 0. MCLK = 256 fs, BCLK = 64 fs.
+//
+// The bus runs at BOARD_BUS_RATE (48 kHz, for music); the voice side of the
+// firmware (echo canceller, wake word, the server protocol) works at 16 kHz.
+// This file keeps that boundary: audio_read() delivers 16 kHz TDM frames
+// (all four slots downsampled together, so mic and loopback reference stay
+// sample-aligned) and the voice playback stream is 16 kHz, upsampled here.
 #include "audio.h"
 #include <math.h>
+#include <string.h>
 #include "board.h"
 #include "driver/i2s_tdm.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
+#include "speex/speex_resampler.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
@@ -15,25 +23,35 @@
 
 static const char *TAG = "audio";
 
+#define BUS_RATE        BOARD_BUS_RATE
+#define RATIO           (BOARD_BUS_RATE / BOARD_SAMPLE_RATE)   // 3
+#define SLOTS           AUDIO_MIC_SLOTS
+#define RESAMPLE_QUALITY 4                                    // speex 0..10
+
 // Playback goes through a PSRAM-backed stream buffer drained by a dedicated task
 // that never lets the I2S DMA run dry: it writes silence when there is nothing
 // to play. Letting TX underrun makes the next write land in a descriptor that is
 // already playing, which is audible as a click.
 #define PLAY_BUF_BYTES  (16000 * 2 * 4)      // 4 s of mono 16-bit at 16 kHz
-#define PLAY_CHUNK      256                  // samples per I2S write (16 ms)
-#define SLOTS           AUDIO_MIC_SLOTS
+#define PLAY_CHUNK      256                  // 16 kHz samples per round (16 ms)
+
+// Capture: the largest audio_read() request, in 16 kHz frames.
+#define READ_MAX        320
 
 static i2s_chan_handle_t s_tx, s_rx;
-static uint32_t s_rate;
+static uint32_t s_rate;                 // voice rate (16 kHz)
 static StreamBufferHandle_t s_play;
 static volatile bool s_discard;         // set while flushing: writers drop data
 static SemaphoreHandle_t s_write_lock;  // stream buffers allow only one writer at a time
 static volatile bool s_playing;         // play task emitted real samples last chunk
+static SpeexResamplerState *s_up;       // 16 -> 48 kHz, mono (voice playback)
+static SpeexResamplerState *s_down;     // 48 -> 16 kHz, 4 interleaved slots (capture)
 
 static void play_task(void *arg)
 {
-    int16_t mono[PLAY_CHUNK];
-    int16_t frame[PLAY_CHUNK * SLOTS] = {0};
+    static int16_t mono[PLAY_CHUNK];
+    static int16_t up[PLAY_CHUNK * RATIO];
+    static int16_t frame[PLAY_CHUNK * RATIO * SLOTS];
     uint8_t *bytes = (uint8_t *)mono;
     size_t carry = 0;   // an odd byte left over from the previous receive
     for (;;) {
@@ -42,27 +60,43 @@ static void play_task(void *arg)
         size_t n = carry + xStreamBufferReceive(s_play, bytes + carry, sizeof(mono) - carry, pdMS_TO_TICKS(5));
         size_t got = n / 2;
         s_playing = got > 0;
-        for (size_t i = 0; i < PLAY_CHUNK; i++) {
-            int16_t v = i < got ? mono[i] : 0;
-            frame[SLOTS * i] = v;         // left half of the frame -> ES8311 left
-            frame[SLOTS * i + 2] = v;     // right half, in case the DAC input is switched
+        uint8_t odd = bytes[n > 0 ? n - 1 : 0];
+        // Always run a full chunk (silence-padded) through the upsampler so
+        // its filter state stays continuous and the output rate constant.
+        for (size_t i = got; i < PLAY_CHUNK; i++) mono[i] = 0;
+        spx_uint32_t in_len = PLAY_CHUNK, out_len = PLAY_CHUNK * RATIO;
+        speex_resampler_process_int(s_up, 0, mono, &in_len, up, &out_len);
+        memset(frame, 0, sizeof(frame));
+        for (size_t i = 0; i < out_len; i++) {
+            frame[SLOTS * i] = up[i];         // left half of the frame -> ES8311 left
+            frame[SLOTS * i + 2] = up[i];     // right half, in case the DAC input is switched
         }
         carry = n & 1;
-        if (carry) bytes[0] = bytes[n - 1];
+        if (carry) bytes[0] = odd;
         size_t written;
-        i2s_channel_write(s_tx, frame, sizeof(frame), &written, portMAX_DELAY);
+        i2s_channel_write(s_tx, frame, out_len * SLOTS * sizeof(int16_t), &written, portMAX_DELAY);
     }
 }
 
 esp_err_t audio_init(uint32_t sample_rate)
 {
     s_rate = sample_rate;
+    ESP_RETURN_ON_FALSE(BUS_RATE % sample_rate == 0, ESP_ERR_INVALID_ARG, TAG, "bus/voice rate");
+    int err;
+    s_up = speex_resampler_init(1, sample_rate, BUS_RATE, RESAMPLE_QUALITY, &err);
+    s_down = speex_resampler_init(SLOTS, BUS_RATE, sample_rate, RESAMPLE_QUALITY, &err);
+    ESP_RETURN_ON_FALSE(s_up && s_down, ESP_ERR_NO_MEM, TAG, "resamplers");
+    // Start the filters with their delay pre-filled, so the first outputs
+    // aren't short (speex otherwise swallows its latency from the first calls).
+    speex_resampler_skip_zeros(s_up);
+    speex_resampler_skip_zeros(s_down);
+
     i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan.auto_clear = true;
     ESP_RETURN_ON_ERROR(i2s_new_channel(&chan, &s_tx, &s_rx), TAG, "channel");
 
     i2s_tdm_config_t tdm = {
-        .clk_cfg = I2S_TDM_CLK_DEFAULT_CONFIG(sample_rate),   // MCLK = 256 fs
+        .clk_cfg = I2S_TDM_CLK_DEFAULT_CONFIG(BUS_RATE),   // MCLK = 256 fs
         .slot_cfg = I2S_TDM_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO,
                         I2S_TDM_SLOT0 | I2S_TDM_SLOT1 | I2S_TDM_SLOT2 | I2S_TDM_SLOT3),
         .gpio_cfg = {
@@ -84,6 +118,7 @@ esp_err_t audio_init(uint32_t sample_rate)
     s_play = xStreamBufferCreateStatic(PLAY_BUF_BYTES, 1, storage, &sb);
     s_write_lock = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(play_task, "play", 4096, NULL, 20, NULL, 1);
+    ESP_LOGI(TAG, "bus %d Hz, voice %lu Hz", BUS_RATE, (unsigned long)sample_rate);
     return ESP_OK;
 }
 
@@ -120,10 +155,35 @@ bool audio_play_idle(void)
     return xStreamBufferIsEmpty(s_play) && !s_playing;
 }
 
+// Reads BUS_RATE TDM frames and hands out 16 kHz ones. The downsampler may
+// return a frame more or less than in/RATIO per call; surplus frames wait in
+// `pending` for the next request, so callers always get exactly what they ask.
 esp_err_t audio_read(int16_t *frames, size_t frames_count)
 {
-    size_t bytes = frames_count * SLOTS * sizeof(int16_t), got;
-    return i2s_channel_read(s_rx, frames, bytes, &got, portMAX_DELAY);
+    static int16_t bus[READ_MAX * RATIO * SLOTS];
+    static int16_t pending[(READ_MAX + 8) * SLOTS];
+    static size_t npending;
+    size_t have = 0;
+    while (have < frames_count) {
+        size_t take = npending < frames_count - have ? npending : frames_count - have;
+        if (take) {
+            memcpy(frames + have * SLOTS, pending, take * SLOTS * sizeof(int16_t));
+            memmove(pending, pending + take * SLOTS, (npending - take) * SLOTS * sizeof(int16_t));
+            npending -= take;
+            have += take;
+            continue;
+        }
+        size_t want = frames_count - have;
+        if (want > READ_MAX) want = READ_MAX;
+        size_t got;
+        ESP_RETURN_ON_ERROR(i2s_channel_read(s_rx, bus, want * RATIO * SLOTS * sizeof(int16_t), &got, portMAX_DELAY),
+                            TAG, "read");
+        spx_uint32_t in_len = got / (SLOTS * sizeof(int16_t));
+        spx_uint32_t out_len = READ_MAX + 8;
+        speex_resampler_process_interleaved_int(s_down, bus, &in_len, pending, &out_len);
+        npending = out_len;
+    }
+    return ESP_OK;
 }
 
 esp_err_t audio_tone(int hz, int ms, int amplitude)

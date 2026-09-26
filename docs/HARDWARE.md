@@ -80,7 +80,10 @@ for 2 s, then off. `status <state> [s]` on the console previews a pattern.
 ### Audio bus
 
 Both codecs are I2S slaves on one bus driven by the S3: MCLK = 256 × fs,
-16 kHz. The bus runs **TDM, 4 × 16-bit slots, Philips framing (BCLK = 64 × fs)
+**48 kHz** (music-capable). The voice side (echo canceller, wake word, server
+audio) runs at 16 kHz: `main/audio.c` downsamples all four capture slots
+together (speexdsp resampler, so the mics and the loopback reference stay
+sample-aligned) and upsamples the 16 kHz voice playback stream. The bus runs **TDM, 4 × 16-bit slots, Philips framing (BCLK = 64 × fs)
 in both directions** — TX and RX share BCLK/WS, and the ES7210 needs four slots
 per frame. The ES8311 auto-detects the clock ratio and plays the left half of
 the frame (slot 0).

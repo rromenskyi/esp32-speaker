@@ -24,4 +24,5 @@
 // TCA9555 pins (0..15, P00..P17)
 #define BOARD_EXIO_PA_EN    8             // speaker power amplifier, active high
 
-#define BOARD_SAMPLE_RATE   16000
+#define BOARD_SAMPLE_RATE   16000         // voice path: AEC, wake word, server audio
+#define BOARD_BUS_RATE      48000         // I2S bus / codecs (music-capable)

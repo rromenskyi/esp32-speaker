@@ -66,7 +66,7 @@ void app_main(void)
 
     // MCLK must be running before the codec's clock manager is configured.
     ESP_ERROR_CHECK(audio_init(BOARD_SAMPLE_RATE));
-    if (es8311_init(BOARD_ADDR_ES8311, BOARD_SAMPLE_RATE) == ESP_OK) {
+    if (es8311_init(BOARD_ADDR_ES8311, BOARD_BUS_RATE) == ESP_OK) {
         tca9555_set_output(BOARD_EXIO_PA_EN, true);
         vTaskDelay(pdMS_TO_TICKS(50));
         audio_tone(880, 150, 6000);

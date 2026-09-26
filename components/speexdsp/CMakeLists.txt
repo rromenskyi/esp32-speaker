@@ -3,7 +3,7 @@
 # smallft FFT — never the GPL FFTW backend.
 idf_component_register(REQUIRES heap
                        SRCS "src/mdf.c" "src/preprocess.c" "src/filterbank.c" "src/fftwrap.c"
-                            "src/smallft.c"
+                            "src/smallft.c" "src/resample.c"
                        INCLUDE_DIRS "include"
                        PRIV_INCLUDE_DIRS "src" "include/speex")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE FLOATING_POINT USE_SMALLFT EXPORT=
