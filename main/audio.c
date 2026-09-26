@@ -56,6 +56,33 @@ static volatile bool s_media_discard;
 static volatile float s_media_target = 1.0f;
 static float s_media_gain = 1.0f;
 
+// Light show input: RMS of the music per band over each play chunk (~16 ms),
+// after the ducking gain, split by two one-pole filters (~150 Hz, ~2.5 kHz).
+static volatile float s_band[3];   // bass, mid, treble; 0..1 of full scale
+
+static void media_meter(const int16_t *pcm, size_t n)
+{
+    static float lp_bass, lp_mid;
+    const float a_bass = 0.0194f;   // 1 - exp(-2 pi 150 / 48000)
+    const float a_mid = 0.279f;     // 1 - exp(-2 pi 2500 / 48000)
+    float e[3] = {0, 0, 0};
+    for (size_t i = 0; i < n; i++) {
+        float x = pcm[i] * s_media_gain * (1.0f / 32768);
+        lp_bass += a_bass * (x - lp_bass);
+        lp_mid += a_mid * (x - lp_mid);
+        float t = x - lp_mid, m = lp_mid - lp_bass;
+        e[0] += lp_bass * lp_bass;
+        e[1] += m * m;
+        e[2] += t * t;
+    }
+    for (int b = 0; b < 3; b++) s_band[b] = n ? sqrtf(e[b] / n) : 0;
+}
+
+void audio_media_levels(float out[3])
+{
+    for (int b = 0; b < 3; b++) out[b] = s_band[b];
+}
+
 static void play_task(void *arg)
 {
     static int16_t mono[PLAY_CHUNK];
@@ -93,6 +120,7 @@ static void play_task(void *arg)
             frame[SLOTS * i] = o;         // left half of the frame -> ES8311 left
             frame[SLOTS * i + 2] = o;     // right half, in case the DAC input is switched
         }
+        media_meter(music, mgot < out_len ? mgot : out_len);
         mcarry = mbytes & 1;
         if (mcarry) mb[0] = modd;
         carry = n & 1;

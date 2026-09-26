@@ -1,5 +1,6 @@
 #include "status.h"
 #include <math.h>
+#include "audio.h"
 #include "board.h"
 #include "esp_timer.h"
 #include "leds.h"
@@ -18,6 +19,39 @@ static volatile int64_t s_error_until;         // ms; red error flash until then
 static volatile int64_t s_preview_until;
 
 static void fill(uint8_t r, uint8_t g, uint8_t b) { leds_fill(BOARD_LED_COUNT, r, g, b); }
+
+// Light show while music plays and the assistant is idle: the lit length
+// follows loudness, the color mixes bass (red), mids (green), treble (blue).
+// Each measure has its own slow automatic gain, so quiet tracks light up too.
+// Returns false (and draws nothing) when no music has sounded for a second.
+static bool music_show(int64_t now)
+{
+    static int64_t last_sound;
+    static float peak = 0.05f, band_peak[3] = {0.02f, 0.02f, 0.02f}, env;
+    float b[3];
+    audio_media_levels(b);
+    float level = b[0] + b[1] + b[2];
+    if (level > 0.002f) last_sound = now;
+    if (now - last_sound > 1000) return false;
+    // Gains: jump up to a new peak at once, relax over ~10 s.
+    peak = level > peak ? level : fmaxf(peak * 0.996f, 0.02f);
+    float k = level / peak;
+    env = k > env ? k : env * 0.8f;               // fast attack, ~0.2 s release
+    uint8_t c[3];
+    for (int i = 0; i < 3; i++) {
+        band_peak[i] = b[i] > band_peak[i] ? b[i] : fmaxf(band_peak[i] * 0.996f, 0.005f);
+        float v = b[i] / band_peak[i];
+        c[i] = (uint8_t)(MAX_LEVEL * v * v);       // squared: more contrast between bands
+    }
+    float lit = env * BOARD_LED_COUNT;
+    for (int i = 0; i < BOARD_LED_COUNT; i++) {
+        float f = lit - i;                         // 1 = fully lit, 0..1 = the fading tip
+        f = f > 1 ? 1 : f < 0 ? 0 : f;
+        leds_set(i, (uint8_t)(c[0] * f), (uint8_t)(c[1] * f), (uint8_t)(c[2] * f));
+    }
+    leds_show();
+    return true;
+}
 
 static void status_task(void *arg)
 {
@@ -38,6 +72,12 @@ static void status_task(void *arg)
         if (s_preview != STATUS_AUTO) {
             if (now < s_preview_until) shown = s_preview;
             else s_preview = STATUS_AUTO;
+        }
+
+        if ((shown == STATUS_OFF || shown == STATUS_AUTO_IDLE) && music_show(now)) {
+            last[0] = last[1] = last[2] = 255;     // force a full redraw afterwards
+            vTaskDelay(pdMS_TO_TICKS(TICK_MS));
+            continue;
         }
 
         uint8_t c[3] = {0, 0, 0};

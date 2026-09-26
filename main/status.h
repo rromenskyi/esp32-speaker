@@ -3,6 +3,7 @@
 
 // Device state shown on the case LEDs. Network states are derived from Wi-Fi
 // automatically; `status_preview` forces a pattern for a few seconds (testing).
+// While music plays and the assistant is idle, the LEDs follow the music.
 typedef enum {
     STATUS_AUTO = -1,
     STATUS_OFF,          // idle: faint green double blink every 8 s (heartbeat)

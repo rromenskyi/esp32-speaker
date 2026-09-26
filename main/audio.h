@@ -18,6 +18,7 @@ esp_err_t audio_media_write(const int16_t *pcm, size_t samples);   // blocks whe
 void audio_media_flush(void);
 size_t audio_media_buffered_ms(void);
 void audio_set_media_gain(float gain);  // 0..1, ramped (ducking)
+void audio_media_levels(float out[3]);  // music RMS now: bass, mid, treble (0..1)
 bool audio_play_idle(void);             // queue empty and the last chunk played
 // Which capture slots audio_read() fills (bit n = slot n; default all). The
 // rest read as zeros: resampling costs CPU per slot. A slot switched back on
